@@ -1,4 +1,4 @@
-# Uberwal — End-to-End System Reference (hulu → hilir)
+# Uberwal — End-to-End System Reference 
 
 > Purpose: give another LLM/engineer **complete** context on what Uberwal produces at every
 > stage, from capturing a coding session in the MCP server (upstream) all the way to what a
