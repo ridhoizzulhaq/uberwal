@@ -36,8 +36,12 @@ import type { Namespace } from "@uberwal/shared";
 
 import { getMemWalClientFromSession } from "./memwal-factory.js";
 
-/** Presets the Reader Agent supports. Each pins a persona and namespaces. */
-export type ReaderPreset = "recruiting" | "productivity";
+/**
+ * Presets the Reader Agent supports. `recruiting` and `productivity` pin an
+ * evaluator persona; `neutral` is the no-persona mode — it reasons over the
+ * recalled memories without role-playing a recruiter or manager.
+ */
+export type ReaderPreset = "recruiting" | "productivity" | "neutral";
 
 /**
  * Default chat model used for reasoning — matches the MCP server's
@@ -105,6 +109,15 @@ export const PRESET_SYSTEM_PROMPTS: Record<ReaderPreset, string> = {
     "does not support a claim, say so rather than speculating. Be concise and",
     "specific.",
   ].join(" "),
+  neutral: [
+    "You are a neutral analyst assistant. Answer the user's question grounded",
+    'STRICTLY in the recalled memories in the "Context memories" block. Do NOT',
+    "adopt an evaluator persona and do NOT frame anyone as a job candidate —",
+    "just report what the memories actually support. Never invent facts,",
+    "skills, or outcomes that are not in the context; if the context does not",
+    "support an answer, say so plainly. Be concise, specific, and cite the",
+    "memories you rely on.",
+  ].join(" "),
 };
 
 /**
@@ -112,11 +125,15 @@ export const PRESET_SYSTEM_PROMPTS: Record<ReaderPreset, string> = {
  *
  * Recruiting reads only `skills`; productivity reads both `productivity` and
  * `reports` so the manager view sees discrete metrics and the prose reports
- * that summarize them.
+ * that summarize them. Neutral reads broadly across every readable namespace
+ * so the no-persona mode can answer general questions; in the share/compare
+ * path this set is intersected with the share's manifest, so it never surfaces
+ * anything the manifest does not allow.
  */
 export const PRESET_NAMESPACES: Record<ReaderPreset, readonly Namespace[]> = {
   recruiting: ["skills"],
   productivity: ["productivity", "reports"],
+  neutral: ["sessions", "skills", "productivity", "transcripts", "reports"],
 };
 
 /**
@@ -175,6 +192,15 @@ export interface RunReaderInput {
    * {@link SESSION_SCOPE_NAMESPACES} (the owner reviewing their own work).
    */
   scopeNamespaces?: Namespace[];
+  /**
+   * Optional trusted, non-memory context injected verbatim into the system
+   * prompt (e.g. the share's subject and who shared it). These facts do NOT
+   * come from recalled memories — they come from the share record — so without
+   * this the assistant cannot see them. Kept in its own block, separate from
+   * the "Context memories" block, so the model treats them as provenance rather
+   * than as recalled evidence.
+   */
+  contextNote?: string;
 }
 
 /**
@@ -273,10 +299,18 @@ function latestUserQuery(messages: readonly ReaderMessage[]): string | null {
 function buildSystemPrompt(
   persona: string,
   memories: readonly UsedMemory[],
+  contextNote?: string,
 ): string {
+  // Trusted, non-memory provenance (share subject / sender / project), shown
+  // ABOVE the recalled context so the assistant can answer "what is this about"
+  // and "who shared this" even though those facts are not in Walrus.
+  const header =
+    contextNote !== undefined && contextNote.length > 0
+      ? [persona, "", contextNote]
+      : [persona];
   if (memories.length === 0) {
     return [
-      persona,
+      ...header,
       "",
       "Context memories:",
       "(no memories were recalled for this query)",
@@ -286,7 +320,7 @@ function buildSystemPrompt(
     (memory, index) =>
       `${index + 1}. [distance ${memory.distance.toFixed(3)}] ${memory.text}`,
   );
-  return [persona, "", "Context memories:", ...lines].join("\n");
+  return [...header, "", "Context memories:", ...lines].join("\n");
 }
 
 /**
@@ -424,7 +458,7 @@ export async function runReader(
     const persona = scoped
       ? NEUTRAL_READER_PROMPT
       : PRESET_SYSTEM_PROMPTS[input.preset];
-    const system = buildSystemPrompt(persona, merged);
+    const system = buildSystemPrompt(persona, merged, input.contextNote);
     const response = await chatClient.chat.completions.create({
       model: resolveModel(),
       messages: [

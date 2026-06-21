@@ -45,7 +45,7 @@ type ShareMeta = Extract<ShareMetaResult, { ok: true }>;
 type LoadState =
   | { kind: "loading" }
   | { kind: "ready"; meta: ShareMeta; sessions: SessionSummary[] }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; needsLogin?: boolean };
 
 interface SessionDetail {
   summary: RecallEntry | null;
@@ -78,7 +78,7 @@ function sessionPreview(text: string): string | null {
   return preview.length > 0 ? `${preview}…` : null;
 }
 
-function ErrorCard({ message }: { message: string }) {
+function ErrorCard({ message, needsLogin }: { message: string; needsLogin?: boolean }) {
   return (
     <main className="flex min-h-screen items-center justify-center bg-canvas px-4">
       <Card className="max-w-md p-6">
@@ -88,9 +88,17 @@ function ErrorCard({ message }: { message: string }) {
           </IconBadge>
           <div>
             <h1 className="font-serif text-lg font-semibold tracking-tight text-ink">
-              Link unavailable
+              {needsLogin ? "Sign in to view" : "Link unavailable"}
             </h1>
             <p className="mt-1 text-sm leading-relaxed text-muted">{message}</p>
+            {needsLogin ? (
+              <a
+                href="/login"
+                className="mt-4 inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-3 py-2 text-xs font-medium text-ink transition-colors hover:bg-canvas focus:outline-none focus:ring-1 focus:ring-ink/20"
+              >
+                Sign in, then reopen this link
+              </a>
+            ) : null}
           </div>
         </div>
       </Card>
@@ -134,31 +142,31 @@ function SharedSessionRow({
   const preview = sessionPreview(session.text);
 
   const toggle = useCallback(() => {
-    setOpen((prev) => {
-      const next = !prev;
-      // Lazy-load on first open; cache afterwards.
-      if (next && detail === null && sessionId !== null) {
-        setDetail({ kind: "loading" });
-        void (async () => {
-          const outcome = await getSessionDetailByToken({ token, sessionId });
-          if (!outcome.ok) {
-            setDetail({ kind: "error", message: outcome.message });
-            return;
-          }
-          setDetail({
-            kind: "ready",
-            detail: {
-              summary: outcome.summary,
-              skills: outcome.skills,
-              productivity: outcome.productivity,
-              transcripts: outcome.transcripts,
-            },
-          });
-        })();
-      }
-      return next;
-    });
-  }, [detail, sessionId, token]);
+    const next = !open;
+    setOpen(next);
+    // Lazy-load on first open; cache afterwards. The side effects live OUTSIDE
+    // any setState updater so we never trigger a state update during another
+    // component's render (which React flags as a setState-in-render error).
+    if (next && detail === null && sessionId !== null) {
+      setDetail({ kind: "loading" });
+      void (async () => {
+        const outcome = await getSessionDetailByToken({ token, sessionId });
+        if (!outcome.ok) {
+          setDetail({ kind: "error", message: outcome.message });
+          return;
+        }
+        setDetail({
+          kind: "ready",
+          detail: {
+            summary: outcome.summary,
+            skills: outcome.skills,
+            productivity: outcome.productivity,
+            transcripts: outcome.transcripts,
+          },
+        });
+      })();
+    }
+  }, [open, detail, sessionId, token]);
 
   // Legacy sessions (no sessionId) can't be gathered individually.
   const isLegacy = sessionId === null;
@@ -266,7 +274,8 @@ export default function TokenSharePage() {
       if (!meta.ok) {
         setState({
           kind: "error",
-          message: "This shared link is not valid or has expired.",
+          message: meta.message,
+          needsLogin: meta.needsLogin === true,
         });
         return;
       }
@@ -305,7 +314,7 @@ export default function TokenSharePage() {
   }
 
   if (state.kind === "error") {
-    return <ErrorCard message={state.message} />;
+    return <ErrorCard message={state.message} needsLogin={state.needsLogin === true} />;
   }
 
   const { meta, sessions } = state;
@@ -335,7 +344,7 @@ export default function TokenSharePage() {
           </span>
           <Badge variant="neutral">Shared view</Badge>
           <Badge variant={modeBadge.variant}>{modeBadge.label}</Badge>
-          <span className="text-sm text-muted">
+          <span className="break-all text-sm text-muted">
             Shared by <span className="font-medium text-ink">{meta.sharedBy}</span>
           </span>
           {meta.label !== null && meta.label.length > 0 ? (
@@ -348,7 +357,7 @@ export default function TokenSharePage() {
             <Badge variant="neutral">Project: {meta.repo}</Badge>
           ) : null}
           <p className="basis-full text-sm text-muted sm:basis-auto sm:ml-auto">
-            Read-only access shared with you. No account needed.
+            Read-only access shared with you.
           </p>
         </div>
       </header>

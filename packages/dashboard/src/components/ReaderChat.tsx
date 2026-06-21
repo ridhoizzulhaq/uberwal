@@ -29,6 +29,7 @@ interface ChatTurn {
 const PRESET_OPTIONS: ReadonlyArray<{ value: ReaderPreset; label: string; description: string }> = [
   { value: "recruiting", label: "Recruiting", description: "Skills and fit assessment" },
   { value: "productivity", label: "Productivity", description: "Output and focus patterns" },
+  { value: "neutral", label: "Neutral", description: "No persona, just the facts" },
 ];
 
 /**

@@ -4,23 +4,22 @@
  * Owner-side server actions for the server-mediated ("token") share model.
  *
  * A share link carries only a random opaque token (e.g. `/v/<token>`), never a
- * key. Creating a share mints a dedicated on-chain delegate key, stores it
- * ENCRYPTED at rest alongside a manifest of what's allowed, and returns only
- * the token. The delegate private key is never returned to the client and
- * never leaves the server boundary — when a recipient opens a token, the
- * server resolves it and recalls on their behalf (see `shared-access.ts`).
+ * key. Creating a share stores the owner's logged-in delegate key ENCRYPTED at
+ * rest alongside a manifest of what's allowed (Option B: DB-only — no on-chain
+ * mint, no gas, no owner wallet required), and returns only the token. The
+ * delegate key never leaves the server boundary; when a recipient opens a
+ * token the server resolves it and recalls on their behalf (see
+ * `shared-access.ts`). Revocation is server-side: marking the record revoked
+ * makes the server refuse the token (the recipient only ever holds the token).
  *
- * All three actions require an owner session: the account id is read from the
- * session cookie, never accepted from the client, so a caller can only ever
- * create, list, or revoke shares for their own account.
+ * All actions require an owner session: the account id (and the delegate key
+ * reused for the share) come from the session cookie, never from the client,
+ * so a caller can only ever create, list, or revoke shares for their own
+ * account.
  */
 
 import { getSession } from "../../server/session.js";
 import { isValidAccountId } from "@uberwal/shared";
-import {
-  createShareDelegateKey,
-  revokeShareDelegateKey,
-} from "../../server/account-share.js";
 import {
   namespacesForMode,
   type ShareMode,
@@ -40,9 +39,9 @@ export type CreateShareResult =
 export type RevokeShareResult = { ok: true } | { ok: false; message: string };
 
 /**
- * Build the default on-chain/display label for a share when the caller omits
- * one: `uberwal-<mode>-<YYYY-MM-DD>` (UTC date), matching the prior labeling
- * convention so on-chain audits stay readable.
+ * Build the default display label for a share when the caller omits one:
+ * `uberwal-<mode>-<YYYY-MM-DD>` (UTC date), matching the prior labeling
+ * convention so share listings stay readable.
  */
 function defaultLabel(mode: ShareMode): string {
   const date = new Date().toISOString().slice(0, 10);
@@ -66,24 +65,29 @@ function toErrorMessage(error: unknown): string {
 }
 
 /**
- * Create a server-mediated share for the current owner.
+ * Create a server-mediated share for the current owner (Option B: DB-only).
  *
- * Mints a dedicated delegate key on-chain, stores it encrypted with a manifest
+ * Stores the owner's logged-in delegate key ENCRYPTED alongside a manifest
  * describing the allowed namespaces (derived from `mode`), an optional
- * `blobIds` whitelist, and an optional `sessionIds` whitelist, then returns the
- * opaque token to embed in the link.
+ * `blobIds` whitelist, an optional `sessionIds` whitelist, and an optional
+ * `repo` scope, then returns the opaque token. No on-chain minting, no gas, no
+ * `SUI_PRIVATE_KEY` required.
  *
- * Returns `{ ok: false }` when unauthenticated or when minting/storage fails
- * (e.g. missing `SUI_PRIVATE_KEY` / `MEMWAL_PACKAGE_ID`). The delegate private
- * key is never included in the result.
+ * The recipient may be addressed by `recipientAccountId` OR by `recipientEmail`
+ * (resolved to an account id via the email↔account directory). When a recipient
+ * is set, the share is addressed+gated: only that account can open `/v/<token>`
+ * (see `shared-access.ts`), and it appears in their "Shared with me" inbox.
+ *
+ * Returns `{ ok: false }` when unauthenticated, when an email isn't linked to
+ * any account, or on storage failure. The delegate key is never returned.
  */
 export async function createShare(input: {
   mode: ShareMode;
   sessionIds?: string[];
   blobIds?: string[];
   label?: string;
-  sharedBy?: string;
   recipientAccountId?: string;
+  recipientEmail?: string;
   repo?: string;
 }): Promise<CreateShareResult> {
   const session = await getSession();
@@ -91,18 +95,36 @@ export async function createShare(input: {
     return { ok: false, message: "Not authenticated" };
   }
 
-  // Optional recipient addressing: when provided it must be a well-formed
-  // account id, so the share lands in the right "Shared with me" inbox.
-  const rawRecipient =
+  // Resolve the recipient (optional). Prefer an explicit account id; otherwise
+  // resolve an email through the directory. A provided-but-unresolvable
+  // recipient is an error so the owner doesn't silently mint an open link when
+  // they intended an addressed one.
+  let recipientAccountId: string | null = null;
+  const rawAccount =
     typeof input.recipientAccountId === "string" ? input.recipientAccountId.trim() : "";
-  if (rawRecipient.length > 0 && !isValidAccountId(rawRecipient)) {
-    return {
-      ok: false,
-      message:
-        "Recipient account id must be 0x followed by 64 hexadecimal characters.",
-    };
+  const rawEmail =
+    typeof input.recipientEmail === "string"
+      ? input.recipientEmail.trim().toLowerCase()
+      : "";
+  if (rawAccount.length > 0) {
+    if (!isValidAccountId(rawAccount)) {
+      return {
+        ok: false,
+        message:
+          "Recipient account id must be 0x followed by 64 hexadecimal characters.",
+      };
+    }
+    recipientAccountId = rawAccount;
+  } else if (rawEmail.length > 0) {
+    const resolved = getShareStore().getAccountByEmail(rawEmail);
+    if (resolved === null) {
+      return {
+        ok: false,
+        message: `No account is linked to ${rawEmail}. Ask them to link their email under "Link email" first.`,
+      };
+    }
+    recipientAccountId = resolved;
   }
-  const recipientAccountId = rawRecipient.length > 0 ? rawRecipient : null;
 
   try {
     const namespaces = namespacesForMode(input.mode);
@@ -110,11 +132,6 @@ export async function createShare(input: {
       typeof input.label === "string" && input.label.length > 0
         ? input.label
         : defaultLabel(input.mode);
-
-    const minted = await createShareDelegateKey({
-      accountId: session.accountId,
-      label,
-    });
 
     const token = newShareToken();
     const repo =
@@ -133,19 +150,21 @@ export async function createShare(input: {
       ...(repo !== null ? { repo } : {}),
     };
 
-    // "Shared by" identity shown to the recipient. Use the owner-provided
-    // display name when present; otherwise leave null and let the recipient
-    // view fall back to a short form of the owner account id.
-    const sharedBy =
-      typeof input.sharedBy === "string" && input.sharedBy.trim().length > 0
-        ? input.sharedBy.trim()
-        : null;
+    // "Shared by" identity is derived from the directory (the owner's linked
+    // email), NOT typed by the user. When no email is linked we fall back to
+    // the FULL account id (never abbreviated) so the recipient always sees who
+    // shared it.
+    const ownerEmail = getShareStore().getEmailByAccount(session.accountId);
+    const sharedBy = ownerEmail ?? session.accountId;
 
+    // Option B (DB-only): reuse the owner's logged-in delegate key rather than
+    // minting a dedicated on-chain key. `publicKeyHex` is empty because there
+    // is no on-chain revoke handle — revocation is server-side via `revoke`.
     getShareStore().create({
       token,
       ownerAccountId: session.accountId,
-      publicKeyHex: minted.publicKeyHex,
-      delegateKey: minted.delegateKey,
+      publicKeyHex: "",
+      delegateKey: session.delegateKey,
       manifest,
       label,
       sharedBy,
@@ -159,12 +178,14 @@ export async function createShare(input: {
 }
 
 /**
- * Revoke a share by token.
+ * Revoke a share by token (DB-only).
  *
- * Loads the record, verifies it belongs to the calling owner, removes the
- * delegate key on-chain, then marks the share revoked in the store. Returns
- * `{ ok: false }` when unauthenticated, when the token is unknown, when the
- * caller does not own the share, or when the on-chain removal fails.
+ * Loads the record, verifies it belongs to the calling owner, then marks the
+ * share revoked in the store. Because access is server-mediated (the recipient
+ * only ever holds the opaque token, never the key), marking the record revoked
+ * makes every recipient action refuse the token — no on-chain transaction is
+ * needed. Returns `{ ok: false }` when unauthenticated, when the token is
+ * unknown, or when the caller does not own the share.
  */
 export async function revokeShare(input: {
   token: string;
@@ -184,10 +205,6 @@ export async function revokeShare(input: {
   }
 
   try {
-    await revokeShareDelegateKey({
-      accountId: session.accountId,
-      publicKeyHex: record.publicKeyHex,
-    });
     store.revoke(input.token);
     return { ok: true };
   } catch (error) {
@@ -215,10 +232,10 @@ export interface SharedWithMeItem {
   token: string;
   /** Share mode (full vs summary). */
   mode: ShareMode;
-  /** Optional human label for the share. */
+  /** Subject/label for the share (the title the sender gave it). */
   label: string | null;
-  /** Who shared it (owner-provided name, or a short account id). */
-  sharedBy: string | null;
+  /** Who shared it: the sender's linked email, else their FULL account id. */
+  sender: string;
   /** Whether the share is scoped to specific sessions. */
   sessionScoped: boolean;
   /** Project/repository the share is scoped to, when set. */
@@ -257,7 +274,13 @@ export async function listSharesForMe(): Promise<SharedWithMeResult> {
       token: s.token,
       mode: s.manifest.mode,
       label: s.label,
-      sharedBy: s.sharedBy,
+      // Sender display: the owner's linked email when present, else the FULL
+      // account id (not abbreviated). A legacy `sharedBy` stored in the
+      // abbreviated `0x…` form is ignored so it's replaced by the full id.
+      sender:
+        s.sharedBy !== null && s.sharedBy.length > 0 && !s.sharedBy.includes("…")
+          ? s.sharedBy
+          : s.ownerAccountId,
       sessionScoped:
         s.manifest.sessionIds !== undefined && s.manifest.sessionIds.length > 0,
       repo: s.manifest.repo ?? null,

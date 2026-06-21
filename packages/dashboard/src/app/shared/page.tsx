@@ -11,14 +11,15 @@
  * Requires a session: an unauthenticated viewer is routed to `/login`.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { CalendarBlank, Tray, Warning } from "@phosphor-icons/react";
+import { CalendarBlank, Tray, Warning, X } from "@phosphor-icons/react";
 
 import { listSharesForMe, type SharedWithMeItem } from "../actions/share";
 import { DashboardShell } from "../../components/DashboardShell";
-import { Badge, Card, IconBadge } from "../../components/ui";
+import { CompareDrawer } from "../../components/CompareDrawer";
+import { Badge, Button, Card, IconBadge } from "../../components/ui";
 
 type LoadState =
   | { kind: "loading" }
@@ -37,6 +38,31 @@ function formatDate(ms: number): string {
 export default function SharedWithMePage() {
   const router = useRouter();
   const [state, setState] = useState<LoadState>({ kind: "loading" });
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [compareOpen, setCompareOpen] = useState<boolean>(false);
+
+  const toggleSelected = useCallback((token: string): void => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(token)) next.delete(token);
+      else next.add(token);
+      return next;
+    });
+  }, []);
+
+  const selectedTokens = Array.from(selected);
+  const selectedSources =
+    state.kind === "ready"
+      ? state.items
+          .filter((item) => selected.has(item.token))
+          .map((item) => ({
+            token: item.token,
+            subject:
+              item.label !== null && item.label.length > 0
+                ? item.label
+                : "Shared session",
+          }))
+      : [];
 
   useEffect(() => {
     let cancelled = false;
@@ -60,7 +86,7 @@ export default function SharedWithMePage() {
 
   return (
     <DashboardShell>
-      <main className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-6 py-10 animate-slide-up">
+      <main className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-6 py-10 pb-28 animate-slide-up">
         <div className="flex flex-col gap-1">
           <h1 className="font-serif text-[28px] font-semibold tracking-tight text-ink">
             Shared with me
@@ -117,38 +143,91 @@ export default function SharedWithMePage() {
 
         {state.kind === "ready" && state.items.length > 0 ? (
           <ul aria-label="Shared with me" className="flex flex-col gap-3">
-            {state.items.map((item) => (
-              <li key={item.token}>
-                <Link href={`/v/${item.token}`} className="block">
+            {state.items.map((item) => {
+              const isSelected = selected.has(item.token);
+              const title =
+                item.label !== null && item.label.length > 0
+                  ? item.label
+                  : "Shared session";
+              return (
+                <li key={item.token}>
                   <Card className="flex items-start gap-3 p-5 transition-colors hover:bg-canvas">
-                    <IconBadge tone="neutral" className="mt-0.5 h-8 w-8">
-                      <CalendarBlank size={16} weight="regular" aria-hidden="true" />
-                    </IconBadge>
-                    <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                      <span className="font-serif text-[17px] font-semibold leading-snug tracking-tight text-ink">
-                        {item.sharedBy !== null && item.sharedBy.length > 0
-                          ? `Shared by ${item.sharedBy}`
-                          : "Shared with you"}
-                      </span>
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <Badge variant={item.mode === "summary" ? "blue" : "yellow"}>
-                          {item.mode === "summary" ? "Summary" : "Full"}
-                        </Badge>
-                        {item.sessionScoped ? (
-                          <Badge variant="neutral">Specific sessions</Badge>
-                        ) : null}
-                        <span className="font-mono text-[11px] text-muted">
-                          {formatDate(item.createdAt)}
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleSelected(item.token)}
+                      aria-label={`Select "${title}" for comparison`}
+                      className="mt-1.5 h-4 w-4 flex-shrink-0 cursor-pointer accent-ink"
+                    />
+                    <Link
+                      href={`/v/${item.token}`}
+                      className="flex min-w-0 flex-1 items-start gap-3"
+                    >
+                      <IconBadge tone="neutral" className="mt-0.5 h-8 w-8">
+                        <CalendarBlank size={16} weight="regular" aria-hidden="true" />
+                      </IconBadge>
+                      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                        <span className="font-serif text-[17px] font-semibold leading-snug tracking-tight text-ink">
+                          {title}
                         </span>
+                        <span className="break-all text-xs text-muted">
+                          from <span className="font-medium text-ink">{item.sender}</span>
+                        </span>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <Badge variant={item.mode === "summary" ? "blue" : "yellow"}>
+                            {item.mode === "summary" ? "Summary" : "Full"}
+                          </Badge>
+                          {item.sessionScoped ? (
+                            <Badge variant="neutral">Specific sessions</Badge>
+                          ) : null}
+                          {item.repo !== null && item.repo.length > 0 ? (
+                            <Badge variant="neutral">{item.repo}</Badge>
+                          ) : null}
+                          <span className="font-mono text-[11px] text-muted">
+                            {formatDate(item.createdAt)}
+                          </span>
+                        </div>
                       </div>
-                    </div>
+                    </Link>
                   </Card>
-                </Link>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         ) : null}
       </main>
+
+      {/* Selection action bar — compare the selected shares in the AI. */}
+      {selectedTokens.length > 0 ? (
+        <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface/95 backdrop-blur-sm">
+          <div className="mx-auto flex max-w-5xl items-center gap-3 px-6 py-3">
+            <Badge variant="neutral">{selectedTokens.length} selected</Badge>
+            <button
+              type="button"
+              onClick={() => setSelected(new Set())}
+              className="inline-flex items-center gap-1 text-xs font-medium text-muted underline-offset-2 transition-colors hover:text-ink hover:underline"
+            >
+              <X size={13} weight="bold" aria-hidden="true" />
+              Clear
+            </button>
+            <div className="ml-auto flex items-center gap-2">
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => setCompareOpen(true)}
+              >
+                Assistant
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <CompareDrawer
+        open={compareOpen && selectedSources.length >= 1}
+        onClose={() => setCompareOpen(false)}
+        sources={selectedSources}
+      />
     </DashboardShell>
   );
 }

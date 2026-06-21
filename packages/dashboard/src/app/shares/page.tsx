@@ -24,6 +24,7 @@ import { listShares, revokeShare } from "../actions/share";
 import type { ShareSummary } from "../../server/share-store";
 import type { ShareMode } from "../../server/share-manifest";
 import { Badge, Card, IconBadge } from "../../components/ui";
+import { LinkEmailCard } from "../../components/LinkEmailCard";
 
 /** Map a share mode to a pastel Badge variant. */
 function modeBadgeVariant(mode: ShareMode): "blue" | "yellow" {
@@ -126,12 +127,10 @@ export default function SharesPage() {
         <h1 className="font-serif text-[28px] font-semibold tracking-tight text-ink">
           Manage shares
         </h1>
-        <p className="mt-1 text-sm leading-relaxed text-muted">
-          Each share link is an opaque token backed by a dedicated on-chain delegate key. Access is
-          enforced server-side per the share&apos;s manifest. Revoking a link removes its key
-          on-chain so it can no longer read this account&apos;s memories.
-        </p>
       </div>
+
+      {/* Link email to account — lets others share to you by email */}
+      <LinkEmailCard />
 
       {/* Empty state */}
       {hydrated && shares.length === 0 ? (

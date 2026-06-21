@@ -143,7 +143,9 @@ describe("SqliteShareStore", () => {
     // No credential / handle fields leak into the summary.
     expect("delegateKey" in summary).toBe(false);
     expect("publicKeyHex" in summary).toBe(false);
-    expect("ownerAccountId" in summary).toBe(false);
+    // ownerAccountId IS included (it's the sender, a public object id — not a
+    // secret) so the recipient inbox can attribute a share to who sent it.
+    expect(summary.ownerAccountId).toBe("0xowner-list-a");
 
     // The other owner's share is not included.
     expect(summaries.some((s) => s.token === tokenB)).toBe(false);

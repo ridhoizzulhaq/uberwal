@@ -43,7 +43,7 @@ export function AssistantDrawer({ open, onClose, sessions, repo, ask }: Assistan
       onClose={onClose}
       title="Assistant"
       description={description}
-      widthClass="w-full max-w-lg"
+      widthClass="w-full max-w-2xl"
     >
       {/* In-scope session labels — exactly which sessions the assistant reads. */}
       {count > 0 ? (

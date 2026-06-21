@@ -23,6 +23,7 @@ import type { Namespace } from "@uberwal/shared";
 import { MemWalClient } from "@uberwal/shared";
 
 import { getShareStore, type ShareRecord } from "../../server/share-store.js";
+import { getSession } from "../../server/session.js";
 import type { ShareMode } from "../../server/share-manifest.js";
 import { filterByManifestScope } from "../../server/manifest-scope.js";
 import {
@@ -63,7 +64,7 @@ export type ShareMetaResult =
       /** Project/repository this share is scoped to, when set. */
       repo: string | null;
     }
-  | { ok: false; message: string };
+  | { ok: false; message: string; needsLogin?: boolean; forbidden?: boolean };
 
 /**
  * Build a per-request `MemWalClient` from a resolved share record.
@@ -102,12 +103,55 @@ function toErrorMessage(error: unknown): string {
 }
 
 /**
- * Shorten a `0x`-prefixed account id to a friendly `0x1234…cdef` form, used as
- * the "shared by" fallback when the owner didn't provide a display name.
+ * Resolve the sender display value: the owner's linked email when present,
+ * else the FULL account id (never abbreviated). A legacy `sharedBy` that was
+ * stored in the abbreviated `0x…` form is treated as unusable so it is
+ * replaced by the full account id.
  */
-function shortAccountId(accountId: string): string {
-  if (accountId.length <= 12) return accountId;
-  return `${accountId.slice(0, 6)}…${accountId.slice(-4)}`;
+function senderDisplay(record: ShareRecord): string {
+  const stored = record.sharedBy;
+  if (stored !== null && stored.length > 0 && !stored.includes("…")) {
+    return stored;
+  }
+  return record.ownerAccountId;
+}
+
+/**
+ * Recipient access gate for addressed shares.
+ *
+ * - Link-only shares (no `recipientAccountId`) keep bearer access — anyone
+ *   with the token may view (unchanged behavior).
+ * - Addressed shares require the viewer to be logged in as the EXACT recipient
+ *   account, turning the link into an account-gated share. A missing session
+ *   reports `needsLogin`; a wrong account reports `forbidden`. In both cases no
+ *   share content is revealed.
+ */
+async function recipientGate(
+  record: ShareRecord,
+): Promise<
+  | { ok: true }
+  | { ok: false; message: string; needsLogin?: boolean; forbidden?: boolean }
+> {
+  const required = record.recipientAccountId;
+  if (typeof required !== "string" || required.length === 0) {
+    return { ok: true };
+  }
+  const session = await getSession();
+  if (session === null) {
+    return {
+      ok: false,
+      message: "Please sign in as the recipient account to view this shared link.",
+      needsLogin: true,
+    };
+  }
+  if (session.accountId !== required) {
+    return {
+      ok: false,
+      message: "This share is addressed to a different account.",
+      forbidden: true,
+    };
+  }
+  return { ok: true };
 }
 
 /**
@@ -126,11 +170,12 @@ export async function getShareMeta(input: {
   if (record === null) {
     return { ok: false, message: "This share link is not valid or has expired." };
   }
+  const gate = await recipientGate(record);
+  if (!gate.ok) {
+    return gate;
+  }
   const sessionIds = record.manifest.sessionIds;
-  const sharedBy =
-    record.sharedBy !== null && record.sharedBy.length > 0
-      ? record.sharedBy
-      : shortAccountId(record.ownerAccountId);
+  const sharedBy = senderDisplay(record);
   return {
     ok: true,
     mode: record.manifest.mode,
@@ -164,6 +209,10 @@ export async function recallByToken(input: {
     }
     if (record.revokedAt !== null) {
       return { ok: false, message: "This share link has been revoked." };
+    }
+    const gate = await recipientGate(record);
+    if (!gate.ok) {
+      return { ok: false, message: gate.message };
     }
     if (!record.manifest.namespaces.includes(input.namespace)) {
       return { ok: false, message: "This namespace is not shared." };
@@ -227,6 +276,10 @@ export async function listSessionsByToken(input: {
     }
     if (record.revokedAt !== null) {
       return { ok: false, message: "This share link has been revoked." };
+    }
+    const gate = await recipientGate(record);
+    if (!gate.ok) {
+      return { ok: false, message: gate.message };
     }
     if (!record.manifest.namespaces.includes("sessions")) {
       return { ok: true, sessions: [] };
@@ -305,6 +358,11 @@ export async function getSessionDetailByToken(input: {
     }
     if (record.revokedAt !== null) {
       return { ok: false, message: "This share link has been revoked." };
+    }
+
+    const gate = await recipientGate(record);
+    if (!gate.ok) {
+      return { ok: false, message: gate.message };
     }
 
     const sessionIds = record.manifest.sessionIds;
@@ -402,6 +460,11 @@ export async function askReaderByToken(input: {
     return { ok: false, message: "This share link has been revoked." };
   }
 
+  const gate = await recipientGate(record);
+  if (!gate.ok) {
+    return { ok: false, message: gate.message };
+  }
+
   // Defense-in-depth: a scoped request may only target sessions the manifest
   // allows. If the manifest carries a session whitelist, intersect with it.
   let scopedIds = input.sessionIds ?? [];
@@ -418,6 +481,34 @@ export async function askReaderByToken(input: {
   // when the recipient hasn't selected individual sessions — so the assistant
   // can never surface memories outside the shared project.
   const scoped = scopedIds.length > 0 || manifestRepo !== undefined;
+
+  // Trusted, non-memory provenance the recipient assistant should know. These
+  // facts come from the share record, NOT from Walrus, so without this the
+  // assistant cannot answer "whose work is this" / "what is this about".
+  //
+  // The wording deliberately disambiguates two things the model otherwise
+  // conflates:
+  //   - the PERSON whose work this is = the developer/owner who shared it
+  //     (identified by `sender`: their linked email, else their account id);
+  //   - the share TITLE (`subject`/label) = a topic label the owner typed, NOT
+  //     a person.
+  const subject =
+    record.label !== null && record.label.trim().length > 0
+      ? record.label.trim()
+      : null;
+  const sender = senderDisplay(record);
+  const noteParts: string[] = [
+    `These memories are the captured work of ONE developer — the owner who shared this view, identified as "${sender}". When asked who this is about, whose work this is, or "who is the subject", answer with this developer (${sender}); never answer with the share title.`,
+  ];
+  if (subject !== null) {
+    noteParts.push(
+      `The owner titled this share "${subject}" — that is a topic label for the share, NOT a person's name.`,
+    );
+  }
+  if (manifestRepo !== undefined) {
+    noteParts.push(`The shared work belongs to the project/repository "${manifestRepo}".`);
+  }
+  const contextNote = `Share provenance (from the share record, not from recalled memories): ${noteParts.join(" ")}`;
 
   // For the UNSCOPED path the preset's namespaces must overlap the manifest;
   // the SCOPED path instead reads the manifest namespaces directly (see below),
@@ -440,6 +531,7 @@ export async function askReaderByToken(input: {
       {
         preset: input.preset,
         messages: input.messages,
+        contextNote,
         // Scoped reads are constrained to the manifest's namespaces so a
         // Summary share can never surface transcripts via the assistant, and
         // to the manifest's repo (when set) so a project share can never
@@ -515,26 +607,43 @@ function resolveCompareClient(): OpenAI {
 /**
  * Build the system prompt for a cross-source compare turn.
  *
- * Reuses the preset persona, then appends a context block where each recalled
- * memory is prefixed with its source label so the model can compare people and
- * attribute every claim to a specific share.
+ * Reuses the preset persona, then lists the candidates in scope (each source's
+ * sender + subject) up front so the model knows WHO it is comparing even for a
+ * source that recalled no memories. After that, each recalled memory is
+ * prefixed with its source label so the model can attribute every claim to a
+ * specific share and never mix evidence between candidates.
+ *
+ * Candidate identity and subject are NOT stored in Walrus — they come from the
+ * share record (SQLite). We inject them here so the assistant can name each
+ * candidate; without this it would only see anonymous memory text.
  */
 function buildCompareSystemPrompt(
   preset: ReaderPreset,
+  sources: readonly string[],
   memories: readonly SourcedMemory[],
 ): string {
   const persona = PRESET_SYSTEM_PROMPTS[preset];
+  const multi = sources.length > 1;
   const intro = [
     persona,
     "",
-    "You are comparing multiple people side by side. Each context memory is",
-    "tagged with its source. When you reference evidence, attribute it to the",
-    "correct source. Never mix evidence between sources, and never invent facts",
-    "that are not in the context.",
+    multi
+      ? "You are comparing multiple people side by side. Each context memory is tagged with its source. When you reference evidence, attribute it to the correct source. Never mix evidence between sources, and never invent facts that are not in the context."
+      : "You are reasoning over a single shared source. Each context memory is tagged with its source; attribute evidence to that source and never invent facts that are not in the context.",
   ].join(" ");
+  const roster =
+    sources.length > 0
+      ? [
+          "",
+          "Sources in this comparison — each line is ONE developer, shown as " +
+            '"who shared it — share title" (the title is a topic label, not a person):',
+          ...sources.map((label, index) => `${index + 1}. ${label}`),
+        ]
+      : [];
   if (memories.length === 0) {
     return [
       intro,
+      ...roster,
       "",
       "Context memories:",
       "(no memories were recalled across the shared sources)",
@@ -544,7 +653,7 @@ function buildCompareSystemPrompt(
     (memory, index) =>
       `${index + 1}. [${memory.source}] [distance ${memory.distance.toFixed(3)}] ${memory.text}`,
   );
-  return [intro, "", "Context memories:", ...lines].join("\n");
+  return [intro, ...roster, "", "Context memories:", ...lines].join("\n");
 }
 
 /** Input accepted by {@link askCompare}. */
@@ -583,6 +692,8 @@ export async function askCompare(input: AskCompareInput): Promise<RunReaderResul
     const store = getShareStore();
 
     const merged: SourcedMemory[] = [];
+    /** Roster of candidates in scope ("sender — subject"), for the prompt. */
+    const sources: string[] = [];
     let usableShares = 0;
 
     for (let i = 0; i < input.tokens.length; i++) {
@@ -596,10 +707,19 @@ export async function askCompare(input: AskCompareInput): Promise<RunReaderResul
       const namespaces = presetNamespaces.filter((ns) => allowed.has(ns));
       if (namespaces.length === 0) continue;
 
+      // Candidate identity + subject come from the share record (SQLite), NOT
+      // from Walrus — the recalled memories carry neither. The sender is the
+      // share's linked email (else the FULL account id, never abbreviated) and
+      // the subject is the share label, so the assistant can name each
+      // candidate and their subject when comparing.
+      const subject =
+        record.label !== null && record.label.trim().length > 0
+          ? record.label.trim()
+          : null;
+      const sender = senderDisplay(record);
       const source =
-        record.label !== null && record.label.length > 0
-          ? record.label
-          : `share #${i + 1}`;
+        subject !== null ? `${sender} — ${subject}` : `${sender} (share #${i + 1})`;
+      sources.push(source);
 
       const client = clientForRecord(record);
       const whitelist = record.manifest.blobIds;
@@ -634,7 +754,7 @@ export async function askCompare(input: AskCompareInput): Promise<RunReaderResul
     merged.sort((a, b) => a.distance - b.distance);
 
     const chatClient = resolveCompareClient();
-    const system = buildCompareSystemPrompt(input.preset, merged);
+    const system = buildCompareSystemPrompt(input.preset, sources, merged);
     const response = await chatClient.chat.completions.create({
       model: resolveCompareModel(),
       messages: [

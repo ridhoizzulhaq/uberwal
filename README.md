@@ -2,29 +2,39 @@
 
 Turn AI coding sessions into **portable, verifiable memory** stored on
 [Walrus Memory (MemWal)](https://memory.walrus.xyz). Capture a session once and
-recall it from any agent; browse, scope, and share it from a dashboard.
+recall it from any agent; browse, scope, reason over, and share it from a
+dashboard.
+
+The thesis is **context-maxxing, not token-maxxing**: capture the real
+substance of work — skills with transcript-grounded evidence, productivity
+signals, and the full transcript — so a teammate or recruiter can understand a
+developer's actual context instead of counting tokens or activity.
 
 Uberwal is a pnpm monorepo with three packages:
 
 | Package | What it is |
 |---|---|
-| `@uberwal/shared` | Pure types, validation, the `UBERWAL_META` header codec, and the `MemWalClient` wrapper used by both other packages. |
-| `@uberwal/mcp-server` | An MCP server exposing 7 tools (capture, recall, report, share) backed by MemWal. |
-| `@uberwal/dashboard` | A Next.js app to browse sessions, scope an assistant, and share memory. |
+| `@uberwal/shared` | Pure types, validation/clamping, the `UBERWAL_META` header codec, recall normalization, and the `MemWalClient` wrapper used by both other packages. |
+| `@uberwal/mcp-server` | An MCP (Model Context Protocol) stdio server exposing 7 tools (capture, recall, report, share-info) backed by MemWal. Runs inside an AI coding client. |
+| `@uberwal/dashboard` | A Next.js 15 app to browse sessions, reason over them with an assistant, and share a scoped, read-only view. |
 
 ---
 
 ## How it works
 
 ```
-        you + your AI assistant
+        you + your AI coding assistant
                   │  (full session transcript)
                   ▼
-        uberwal MCP server
-           ├─ Extractor  ── OpenAI-compatible LLM   (turns transcript → facts)
-           └─ MemWalClient ── relayer ── Walrus / Sui (append-only storage)
-                  ▲
-        uberwal dashboard (read / scope / share)
+        uberwal MCP server  ── extract_session (preview) ─▶ you review
+           ├─ Extractor  ──── OpenAI-compatible LLM   (transcript → candidate facts)
+           └─ MemWalClient ── relayer ── Walrus / Sui  (append-only storage)
+                  ▲                         ▲ commit_session writes the approved facts
+                  │  delegate key + account id
+        uberwal dashboard  (read · reason · scope · share)
+                  │
+                  ▼
+        share token /v/<token>  ──▶  recipient (recruiter / teammate)
 ```
 
 MemWal stores **one string per memory** and recall returns
@@ -36,81 +46,173 @@ at recall time:
 UBERWAL_META:v1:<base64url(JSON.stringify(meta))>\n<body>
 ```
 
-The header carries `sessionId`, `type`, `index`, `repo`, and `capturedAt`.
-Storage is **append-only** (no delete/overwrite). Memories live in five fixed
-namespaces: `sessions`, `skills`, `productivity`, `reports`, `transcripts`.
+The header carries `sessionId`, `type`, `index`, `repo`, and `capturedAt`. The
+parser never throws and is a no-op for any text without the prefix, so memories
+captured before the header existed (and raw transcript text) stay fully
+compatible. Storage is **append-only** — no delete, no overwrite.
+
+### The five namespaces
+
+| Namespace | Holds | Written by |
+|---|---|---|
+| `sessions` | One summary per captured session | `commit_session` |
+| `skills` | Atomic skill facts (often with an `Evidence:` line) | `commit_session` |
+| `productivity` | Atomic productivity / output observations | `commit_session` |
+| `transcripts` | The chunked raw transcript (auto-stored, not a dashboard tab) | `commit_session` |
+| `reports` | Generated prose reports (aggregated, not per-session) | `generate_report` |
 
 ### Key concepts
 
-- **Session** — one capture (one `extract_session` → `commit_session` cycle),
+- **Session** — one capture cycle (`extract_session` → `commit_session`),
   identified by a random `sessionId`. A session fans out into many memories
-  (one summary + N skills + N productivity facts + N transcript chunks) that
-  share that id.
+  (one summary + N skills + N productivity facts + N transcript chunks) that all
+  share that id, so the dashboard can regroup them later.
 - **Repo** — an optional, host-agnostic **project label** (e.g. the workspace
-  folder name) stamped on every memory of a session, so many sessions can be
-  grouped, scoped, and shared as one project. It is a tag, not a stored object,
-  and not a GitHub integration.
-- **capturedAt** — an epoch-ms timestamp stamped at commit time, giving every
+  folder name, normalized to a slug) stamped on every memory of a session, so
+  many sessions can be grouped, scoped, and shared as one project. It is a tag,
+  not a stored object, and **not** a GitHub integration.
+- **capturedAt** — an epoch-ms timestamp stamped once per commit, giving every
   memory a sortable "when".
+- **Delegate key vs account** — memory is addressed by a Sui `accountId` plus an
+  Ed25519 **delegate** private key. The delegate key is a scoped credential that
+  can read/append to that account's memory; it is **not** the Sui wallet key.
+  Multiple delegate keys can exist for one account, which is what makes
+  server-mediated sharing possible.
 
 ---
 
 ## The MCP tools
 
-| Tool | Reads MemWal | LLM | Writes MemWal | Purpose |
+| Tool | Reads | LLM | Writes | Purpose |
 |---|:---:|:---:|:---:|---|
-| `extract_session` | — | ✓ | — | Phase 1: turn a raw transcript into a preview of candidate facts + transcript chunks. Optional `repo` tag. Stores nothing. |
-| `commit_session` | — | — | ✓ | Phase 2: store the approved candidates + chunks. Includes a **secret gate** and a relayer health gate. |
+| `extract_session` | — | ✓ | — | **Phase 1:** sanitize secrets, then turn a raw transcript into a *preview* of candidate facts + transcript chunks. Optional `repo` tag. Stores nothing; no health gate. |
+| `commit_session` | — | — | ✓ | **Phase 2:** store the approved candidates + chunks. Runs a **secret gate** and a 5s relayer **health gate** first. |
 | `recall_memory` | ✓ | — | — | Semantic search within one namespace. |
-| `my_skills` | ✓ | — | — | Recall shortcut for the `skills` namespace. |
-| `my_productivity` | ✓ | — | — | Recall shortcut for the `productivity` namespace. |
-| `generate_report` | ✓ | ✓ | ✓ | Aggregate `skills` + `productivity` into one prose report stored in `reports`. |
-| `generate_share_info` | — | — | — | Output the delegate public key, account id, and dashboard URL for sharing. |
+| `my_skills` | ✓ | — | — | Recall shortcut pinned to `skills`. |
+| `my_productivity` | ✓ | — | — | Recall shortcut pinned to `productivity`. |
+| `generate_report` | ✓ | ✓ | ✓ | Aggregate up to 50 each from `skills` + `productivity` into one prose report stored in `reports` (needs ≥3 combined entries). |
+| `generate_share_info` | — | — | — | Output the delegate **public** key, account id, relayer URL, and dashboard URL for sharing. The private key is never emitted. |
 
-**Two-phase capture** keeps a human in the loop: `extract_session` returns a
-preview and writes nothing; you review it and pass the approved subset to
-`commit_session`, which is the only place writes happen.
+### Two-phase capture (human in the loop)
 
-**Secret gate** (`commit_session`): before writing to permanent, append-only
-storage, every candidate and transcript chunk is scanned for likely
-credentials. A hit refuses the whole commit and reports masked samples (never
-the raw secret). Pass `acknowledgeSecrets: true` to override once you've
-confirmed a finding is a false positive.
+`extract_session` returns a `Preview` and writes nothing:
+
+```jsonc
+{
+  "candidates": [
+    { "id": "…", "type": "session",      "text": "…", "sessionId": "…", "repo": "uberwal" },
+    { "id": "…", "type": "skill",        "text": "Implemented JWT auth (TS)", "evidence": "…", "sessionId": "…", "repo": "…" },
+    { "id": "…", "type": "productivity", "text": "Closed 3 PRs…", "sessionId": "…", "repo": "…" }
+  ],
+  "transcriptChunks": [ { "index": 0, "text": "…", "sessionId": "…", "repo": "…" } ]
+}
+```
+
+You review it and pass the approved subset to `commit_session`, which is the
+only place writes happen. Each approved candidate is routed by `type`
+(`session` → `sessions` with a 30s timeout, `skill` → `skills`, `productivity` →
+`productivity`); transcript chunks are auto-stored into `transcripts`. Writes are
+**fail-soft** — a per-item failure never aborts the batch, and the result reports
+every outcome:
+
+```jsonc
+{
+  "outcomes": [ { "id": "…", "type": "skill", "namespace": "skills", "ok": true } ],
+  "succeeded": 12, "failed": 0,
+  "transcriptOutcomes": [ { "index": 0, "ok": true } ],
+  "transcriptsStored": 32, "transcriptsFailed": 0
+}
+```
+
+### The secret gate
+
+Before writing to permanent, append-only storage, `commit_session` scans every
+candidate and transcript chunk for likely credentials. A hit **refuses the whole
+commit** and reports masked samples (never the raw secret). Pass
+`acknowledgeSecrets: true` to override once you've confirmed a finding is a false
+positive. Separately, `extract_session` runs a best-effort local redaction pass
+**first** in the pipeline (PEM keys, JWTs, connection-string credentials,
+`sk-`/`AKIA`/`gh*_` tokens, sensitive `KEY=VALUE`), so neither the LLM nor Walrus
+sees detectable secrets. Both are **best-effort, not a guarantee** — do not
+capture sessions containing real credentials.
 
 ---
 
 ## The dashboard
 
-- **Sessions** — a session-centric list. Filter by project (repo) chips, select
-  sessions, or open one to read its detail.
-- **Assistant** — a reader agent scoped to the selected sessions (or a project),
-  grounded strictly in recalled memories, with markdown rendering.
-- **Project summary** — an on-demand synthesis across a selected project's
-  sessions ("wiki-for-now").
-- **Share** — mint an opaque, server-mediated share link (`/v/<token>`). The
-  delegate key never reaches the browser; access is enforced server-side per a
-  manifest (mode + session/repo scope). Recipients get a "Shared with me" inbox.
+### Owner workspace
+- **Sessions** — a session-centric list (`listSessions`). Each card shows a
+  title, preview, project (`repo`) badge, and short session id. Legacy sessions
+  (captured before per-session linkage) render read-only.
+- **Project chips + "Select all in view"** — filter by project and one-click
+  select a whole project's sessions.
+- **Session detail** (`/s/<sessionId>`) — gathers a session's linked memories
+  across namespaces with a multi-pass, dedup-by-blob recall. This is
+  **best-effort** coverage (semantic recall, capped), not an exhaustive listing.
+
+### Assistant (Reader Agent)
+The assistant is **recall + reason**: it recalls grounding from MemWal, then an
+OpenAI-compatible model reasons over it under a system prompt. It never delegates
+reasoning to MemWal's own `ask()`. Three presets:
+
+| Preset | Recalls | Persona |
+|---|---|---|
+| `recruiting` | `skills` | Technical recruiter; cite evidence. |
+| `productivity` | `productivity` + `reports` | Engineering manager; anti-vanity-metrics. |
+| `neutral` | broad (all readable namespaces) | **No persona** — "just the facts". |
+
+When the assistant is **scoped** to selected sessions or a project, it switches
+to a neutral prompt and never frames the developer as a job candidate. For
+shared views it also receives a **provenance note** (who shared it, the share
+title, the project) so it can answer "whose work is this / what is this about" —
+facts that live in the share record, not in Walrus.
+
+### Sharing (server-mediated, DB-only — Option B)
+
+A share link is an **opaque token** (`/v/<token>`), never a key. Creating a
+share stores the owner's logged-in delegate key **encrypted at rest** in a local
+SQLite store (`node:sqlite`) alongside a **manifest** of what's allowed. There is
+**no on-chain mint, no gas, no owner wallet key**. When a recipient opens a
+token, the server resolves it, decrypts the key for a single request, enforces
+the manifest, and returns only allowed content — the key never reaches the
+browser. Revocation is instant and DB-only.
+
+- **Modes** — `summary` (sessions, skills, productivity, reports) or `full`
+  (those + transcripts).
+- **Scope** — a share can be narrowed to specific `sessionIds`, `blobIds`,
+  and/or a `repo`; every recipient recall is filtered to that scope.
+- **Addressing** — a share can be open (anyone with the link) or **addressed**
+  to a recipient by account id **or email**. Addressed shares are gated: only
+  that account can open the link after signing in, and it appears in their
+  **"Shared with me"** inbox (`/shared`).
+- **Email ↔ account directory** — an owner can link an email to their account so
+  others can address shares by email. This is **self-asserted** (no email
+  verification) — a convenience directory, not proof of identity.
+- **Compare** — from the inbox, select one or more shares and open the
+  **Assistant** to reason across them; each source is labeled by sender + share
+  title so the model can attribute and compare without mixing evidence.
+
+> An on-chain sharing path (`server/account-share.ts`) remains in the repo but is
+> **unused** by the shipped DB-only flow.
 
 ---
 
 ## Getting started
 
 ### Prerequisites
-
 - Node.js >= 20 (Node 22 recommended)
 - pnpm 11+
-- A MemWal account (a Sui account id + an Ed25519 delegate private key) and a
+- A MemWal account: a Sui account id + an Ed25519 delegate private key + a
   relayer URL
 - An OpenAI-compatible API key for the LLM tools (`extract_session`,
   `generate_report`, and the dashboard assistant)
 
 ### Install, build, test
-
 ```bash
 pnpm install
 pnpm -r run build          # build all packages
 pnpm -r run typecheck      # typecheck all packages
-pnpm exec vitest run       # run the full test suite
+pnpm exec vitest run       # run the full test suite (unit + property)
 ```
 
 ---
@@ -119,7 +221,7 @@ pnpm exec vitest run       # run the full test suite
 
 > Secrets are never committed. `.env`, `.env.local`, `.kiro/settings/`, and
 > `.data/` are all gitignored. Use placeholders below; supply real values
-> locally only.
+> locally only. Verify with `git check-ignore -v <file>` before pushing.
 
 ### MCP server (via your MCP client config, e.g. `.kiro/settings/mcp.json`)
 
@@ -132,7 +234,7 @@ pnpm exec vitest run       # run the full test suite
       "env": {
         "DELEGATE_KEY": "…64-char hex…",
         "ACCOUNT_ID": "0x…64-char hex…",
-        "RELAYER_URL": "https://relayer.memory.walrus.xyz",
+        "RELAYER_URL": "https://relayer-staging.memory.walrus.xyz",
         "OPENAI_API_KEY": "…",
         "OPENAI_BASE_URL": "https://…(optional, for OpenAI-compatible gateways)…",
         "OPENAI_MODEL": "openai.gpt-oss-120b"
@@ -147,9 +249,10 @@ pnpm exec vitest run       # run the full test suite
 | `DELEGATE_KEY` | ✓ | 64-char hex Ed25519 delegate private key — signs relayer requests. |
 | `ACCOUNT_ID` | ✓ | `0x`-prefixed Sui account object id. |
 | `RELAYER_URL` | ✓ | Base URL of the MemWal relayer. |
-| `OPENAI_API_KEY` | ✓ | API key for the LLM. Falls back to `AWS_BEARER_TOKEN_BEDROCK` when unset (for the AWS Bedrock OpenAI-compatible gateway). |
+| `OPENAI_API_KEY` | ✓ | API key for the LLM. **Falls back to `AWS_BEARER_TOKEN_BEDROCK`** when unset (for the AWS Bedrock OpenAI-compatible gateway). |
 | `OPENAI_BASE_URL` | — | Override the API base URL for OpenAI-compatible endpoints. |
 | `OPENAI_MODEL` | — | Model id (default `openai.gpt-oss-120b`). |
+| `DASHBOARD_URL` | — | Dashboard URL used in `generate_share_info` (default `http://localhost:3000`). |
 
 > After editing MCP source, rebuild (`pnpm --filter @uberwal/mcp-server run build`)
 > and reconnect the server — clients run `dist/`.
@@ -157,41 +260,56 @@ pnpm exec vitest run       # run the full test suite
 ### Dashboard (`packages/dashboard/.env.local`)
 
 ```bash
-SESSION_SECRET=…32-byte hex (openssl rand -hex 32)…
-RELAYER_URL=https://relayer.memory.walrus.xyz
+SESSION_SECRET=…32-byte hex (openssl rand -hex 32) or a passphrase…
+RELAYER_URL=https://relayer-staging.memory.walrus.xyz
 OPENAI_API_KEY=…            # falls back to AWS_BEARER_TOKEN_BEDROCK
-OPENAI_BASE_URL=…           # optional
+OPENAI_BASE_URL=…           # optional, OpenAI-compatible gateway
 OPENAI_MODEL=openai.gpt-oss-120b
-# Sharing (on-chain delegate keys) — only needed to enable share links:
-# SUI_PRIVATE_KEY=…
-# MEMWAL_PACKAGE_ID=0x…
-# SUI_NETWORK=mainnet        # "testnet" | "mainnet" (default testnet)
+# SHARE_DB_PATH=.data/shares.db   # optional; default location of the share store
 ```
 
-Run the dashboard:
+| Variable | Required | Purpose |
+|---|:---:|---|
+| `SESSION_SECRET` | ✓ | Key for the AES-256-GCM session cookie (64-char hex, or a passphrase derived via scrypt). |
+| `RELAYER_URL` | ✓ | Base URL of the MemWal relayer (must match the network your account/keys belong to). |
+| `OPENAI_API_KEY` | ✓ | API key for the assistant. Falls back to `AWS_BEARER_TOKEN_BEDROCK`. |
+| `OPENAI_BASE_URL` | — | Override the API base URL. |
+| `OPENAI_MODEL` | — | Model id (default `openai.gpt-oss-120b`). |
+| `SHARE_DB_PATH` | — | Path to the SQLite share store (default `.data/shares.db`). |
 
+> Sharing is **DB-only** — no `SUI_PRIVATE_KEY` / `MEMWAL_PACKAGE_ID` / gas
+> required. The owner's logged-in delegate key is reused (encrypted at rest).
+
+Run the dashboard:
 ```bash
 pnpm --filter @uberwal/dashboard dev
 ```
 
-> The relayer URL above points at **mainnet**. For development you can use the
-> staging relayer (`https://relayer-staging.memory.walrus.xyz`). Note that
-> accounts/keys and stored memories are network-specific: switching networks is
-> a clean slate, not a migration.
+> **Networks.** The examples point at the **staging** relayer
+> (`https://relayer-staging.memory.walrus.xyz`); mainnet is
+> `https://relayer.memory.walrus.xyz`. Accounts/keys and stored memories are
+> network-specific — switching networks is a clean slate, not a migration.
 
 ---
 
 ## Security notes
 
-- **Credentials are server-only.** The dashboard keeps the delegate key behind
-  an encrypted session cookie and builds a MemWal client per request on the
-  server; it never reaches the browser.
-- **Shares are server-mediated.** A share link is an opaque token, not a key.
-  The server resolves it and enforces a manifest (mode + session/repo scope).
+- **Credentials are server-only.** The dashboard keeps the delegate key behind an
+  AES-256-GCM **encrypted, httpOnly, Secure, SameSite=Strict** session cookie and
+  builds a MemWal client per request on the server; the key never reaches the
+  browser and is never logged.
+- **Shares are server-mediated.** A share link is an opaque 128-bit token, not a
+  key. The server resolves it and enforces the manifest (mode + session/repo
+  scope); addressed shares are gated to the exact recipient account. Revocation
+  is instant and DB-only.
 - **The secret gate** blocks likely credentials from being written to permanent
-  storage.
-- **Nothing secret is committed.** Verify with `git check-ignore -v <file>`
-  before pushing.
+  storage; transcript redaction runs first, in-process, before the LLM or Walrus
+  sees the text.
+- **Best-effort, flagged limitations:** secret redaction is pattern-based (not a
+  guarantee), the email directory is self-asserted (no verification), and
+  recall/session-detail are semantic + capped (best-effort coverage, not
+  exhaustive listings).
+- **Nothing secret is committed.** Verify with `git check-ignore -v <file>`.
 
 ---
 
@@ -199,13 +317,18 @@ pnpm --filter @uberwal/dashboard dev
 
 ```
 uberwal/
-├── package.json                 # pnpm workspace root
+├── package.json                 # pnpm workspace root (scripts: build, test, typecheck)
+├── tsconfig.base.json           # strict TS shared config
 ├── packages/
-│   ├── shared/                  # @uberwal/shared — types, validation, MemWalClient, header codec
-│   ├── mcp-server/              # @uberwal/mcp-server — the 7 MCP tools
-│   │   └── src/tools/           # extract-session, commit-session, recall, report, share, …
-│   └── dashboard/               # @uberwal/dashboard — Next.js app (sessions, assistant, share)
-│       ├── src/app/             # routes incl. /v/[token] (recipient), /s/[sessionId]
-│       ├── src/components/      # SessionBlock, AssistantDrawer, ProjectSummary, SharePanel, …
-│       └── src/server/          # reader-agent, share-store, memwal-factory, …
+│   ├── shared/                  # @uberwal/shared
+│   │   └── src/                 #   memwal-client, memory-meta (header codec), result, validation, namespaces
+│   ├── mcp-server/              # @uberwal/mcp-server
+│   │   └── src/
+│   │       ├── tools/           #   extract-session, commit-session, recall-memory, my-*, generate-report, generate-share-info
+│   │       └── extraction/      #   extractor (LLM), prompts, sanitize, chunk, secret-scan
+│   └── dashboard/               # @uberwal/dashboard — Next.js app
+│       ├── src/app/             #   workspace, /s/[sessionId], /shared (inbox), /v/[token] (recipient)
+│       │   └── actions/         #   auth, recall, reader, share, shared-access, directory
+│       ├── src/components/      #   ReaderChat, AssistantDrawer, CompareDrawer, SharePanel, ProjectSummary, …
+│       └── src/server/          #   session (encrypted cookie), memwal-factory, reader-agent, share-store (SQLite), share-manifest, manifest-scope
 ```

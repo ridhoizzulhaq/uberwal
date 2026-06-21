@@ -105,6 +105,12 @@ export interface NewShareRecord {
  */
 export interface ShareSummary {
   token: string;
+  /**
+   * `0x`-prefixed account object id that sent the share. Included so the
+   * recipient inbox can attribute a share to its sender; it is a public object
+   * id, not a credential. The delegate key and on-chain handle are still omitted.
+   */
+  ownerAccountId: string;
   manifest: ShareManifest;
   label: string | null;
   sharedBy: string | null;
@@ -128,6 +134,16 @@ export interface ShareStore {
   listForRecipient(recipientAccountId: string): ShareSummary[];
   /** Mark a share revoked (idempotent; no-op for unknown tokens). */
   revoke(token: string): void;
+  /**
+   * Link an email to an account id (insert or replace). Self-asserted by the
+   * logged-in owner — there is no email verification, so callers must treat the
+   * mapping as a convenience directory, not proof of email ownership.
+   */
+  setEmailMapping(email: string, accountId: string): void;
+  /** Resolve an email to its account id, or `null` if unmapped. */
+  getAccountByEmail(email: string): string | null;
+  /** Reverse lookup: the most recent email mapped to an account id, or `null`. */
+  getEmailByAccount(accountId: string): string | null;
 }
 
 /** Shape of a `shares` table row as returned by better-sqlite3. */
@@ -204,6 +220,16 @@ class SqliteShareStore implements ShareStore {
     if (!columns.some((c) => c.name === "recipient_account_id")) {
       this.db.exec(`ALTER TABLE shares ADD COLUMN recipient_account_id TEXT`);
     }
+    // Email ↔ account directory: lets a share be addressed by email (resolved
+    // to an account id at create time). `email` is the primary key so a
+    // re-registration updates the mapping in place.
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS account_directory (
+        email TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`,
+    );
   }
 
   create(rec: NewShareRecord): void {
@@ -286,6 +312,7 @@ class SqliteShareStore implements ShareStore {
       if (manifest === null) continue;
       summaries.push({
         token: row.token,
+        ownerAccountId: row.owner_account_id,
         manifest,
         label: row.label,
         sharedBy: row.shared_by ?? null,
@@ -301,6 +328,33 @@ class SqliteShareStore implements ShareStore {
     this.db
       .prepare(`UPDATE shares SET revoked_at = ? WHERE token = ? AND revoked_at IS NULL`)
       .run(Date.now(), token);
+  }
+
+  setEmailMapping(email: string, accountId: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO account_directory (email, account_id, created_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(email) DO UPDATE SET account_id = excluded.account_id,
+                                          created_at = excluded.created_at`,
+      )
+      .run(email, accountId, Date.now());
+  }
+
+  getAccountByEmail(email: string): string | null {
+    const row = this.db
+      .prepare(`SELECT account_id FROM account_directory WHERE email = ?`)
+      .get(email) as unknown as { account_id: string } | undefined;
+    return row?.account_id ?? null;
+  }
+
+  getEmailByAccount(accountId: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT email FROM account_directory WHERE account_id = ? ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(accountId) as unknown as { email: string } | undefined;
+    return row?.email ?? null;
   }
 }
 

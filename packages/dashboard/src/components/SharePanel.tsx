@@ -8,11 +8,12 @@
  * more sessions (or opens this panel from a single session's detail page) and
  * this panel mints a link scoped to exactly those `sessionIds`.
  *
- * Token model (server-mediated): "Create link" calls the `createShare` server
- * action with `{ mode, sessionIds }`, which mints a *dedicated* on-chain
- * delegate key, stores it ENCRYPTED server-side alongside a manifest (the
- * allowed namespaces for the mode + the session-id whitelist), and returns only
- * a random opaque token. The panel assembles that token into a canonical link:
+ * Token model (server-mediated, DB-only): "Create link" calls the `createShare`
+ * server action with `{ mode, sessionIds, repo?, recipient? }`, which stores the
+ * owner's logged-in delegate key ENCRYPTED server-side alongside a manifest (the
+ * allowed namespaces for the mode + the session-id/repo scope), and returns only
+ * a random opaque token. No on-chain mint, no gas. The panel assembles that
+ * token into a canonical link:
  *
  *   ${origin}/v/<token>
  *
@@ -23,10 +24,21 @@
 
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { ShareNetwork, X, CircleNotch, Copy, Check, Warning } from "@phosphor-icons/react";
+import { ShareNetwork, X, CircleNotch, Copy, Check, Warning, MagnifyingGlass } from "@phosphor-icons/react";
 import type { ShareMode } from "../server/share-manifest";
 import { createShare } from "../app/actions/share";
+import { lookupEmail } from "../app/actions/directory";
 import { Button } from "./ui";
+
+/** A `0x`-prefixed 64-hex Sui account object id. */
+const ACCOUNT_ID_RE = /^0x[0-9a-fA-F]{64}$/;
+/** Conservative email shape check (mirrors the directory action). */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** Shorten an account id for compact display. */
+function shortId(id: string): string {
+  return id.length <= 12 ? id : `${id.slice(0, 6)}…${id.slice(-4)}`;
+}
 
 export interface SharePanelProps {
   /** The selected session ids this link will be scoped to. */
@@ -51,6 +63,14 @@ type PanelState =
   | { kind: "ready"; url: string }
   | { kind: "error"; message: string };
 
+/** Email-lookup state for the "Share to" field when an email is entered. */
+type LookupState =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "found"; accountId: string }
+  | { kind: "notfound" }
+  | { kind: "error"; message: string };
+
 /** Build the canonical server-mediated share link (token only — never a key). */
 function buildShareLink(input: { origin: string; token: string }): string {
   return `${input.origin}/v/${input.token}`;
@@ -58,14 +78,21 @@ function buildShareLink(input: { origin: string; token: string }): string {
 
 export function SharePanel({ sessionIds, repo, onClose }: SharePanelProps) {
   const [mode, setMode] = useState<ShareMode>("summary");
-  const [sharedByName, setSharedByName] = useState<string>("");
-  const [recipientAccountId, setRecipientAccountId] = useState<string>("");
+  const [subject, setSubject] = useState<string>("");
+  const [recipient, setRecipient] = useState<string>("");
+  const [lookup, setLookup] = useState<LookupState>({ kind: "idle" });
   const [state, setState] = useState<PanelState>({ kind: "idle" });
   const [copied, setCopied] = useState(false);
   const overlayRef = useRef<HTMLDivElement>(null);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const count = sessionIds.length;
+
+  const trimmedRecipient = recipient.trim();
+  const recipientIsEmail = EMAIL_RE.test(trimmedRecipient);
+  const recipientIsAccount = ACCOUNT_ID_RE.test(trimmedRecipient);
+  const recipientInvalid =
+    trimmedRecipient.length > 0 && !recipientIsEmail && !recipientIsAccount;
 
   // Close on Escape.
   useEffect(() => {
@@ -97,8 +124,9 @@ export function SharePanel({ sessionIds, repo, onClose }: SharePanelProps) {
       const result = await createShare({
         mode,
         sessionIds,
-        sharedBy: sharedByName,
-        recipientAccountId,
+        ...(subject.trim().length > 0 ? { label: subject.trim() } : {}),
+        ...(recipientIsAccount ? { recipientAccountId: trimmedRecipient } : {}),
+        ...(recipientIsEmail ? { recipientEmail: trimmedRecipient } : {}),
         ...(repo !== undefined && repo.length > 0 ? { repo } : {}),
       });
       if (!result.ok) {
@@ -112,6 +140,27 @@ export function SharePanel({ sessionIds, repo, onClose }: SharePanelProps) {
       setState({ kind: "ready", url });
     } catch {
       setState({ kind: "error", message: "Failed to create share link. Try again." });
+    }
+  };
+
+  /** Resolve the entered email to an account id (preview before sharing). */
+  const handleCheckEmail = async () => {
+    const email = trimmedRecipient.toLowerCase();
+    if (!EMAIL_RE.test(email)) return;
+    setLookup({ kind: "checking" });
+    try {
+      const res = await lookupEmail({ email });
+      if (!res.ok) {
+        setLookup({ kind: "error", message: res.message });
+        return;
+      }
+      setLookup(
+        res.accountId !== null
+          ? { kind: "found", accountId: res.accountId }
+          : { kind: "notfound" },
+      );
+    } catch {
+      setLookup({ kind: "error", message: "Lookup failed. Try again." });
     }
   };
 
@@ -226,56 +275,99 @@ export function SharePanel({ sessionIds, repo, onClose }: SharePanelProps) {
             .
           </p>
 
-          {/* Shared-by identity */}
+          {/* Subject */}
           <div>
             <label
-              htmlFor="share-shared-by"
+              htmlFor="share-subject"
               className="mb-2 block text-xs font-medium text-muted"
             >
-              Shared by
+              Subject
             </label>
             <input
-              id="share-shared-by"
+              id="share-subject"
               type="text"
-              value={sharedByName}
-              onChange={(e) => setSharedByName(e.target.value)}
-              placeholder="Your name (shown to the recipient)"
-              maxLength={80}
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              placeholder="e.g. React/Next.js work for review"
+              maxLength={120}
               className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted focus:border-ink focus:outline-none focus:ring-1 focus:ring-ink/20"
             />
             <p className="mt-1 text-[11px] leading-relaxed text-muted">
-              Optional. If left blank, the recipient sees a short form of your
-              account id.
+              Optional. A short title for this share, shown to the recipient. If
+              left blank, a default label is used. &ldquo;Shared by&rdquo; is taken
+              from your linked email automatically.
             </p>
           </div>
 
-          {/* Address to a recipient (optional) — also shows in their inbox */}
+          {/* Address to a recipient (optional) — account id OR email */}
           <div>
             <label
               htmlFor="share-recipient"
               className="mb-2 block text-xs font-medium text-muted"
             >
-              Share to (account id)
+              Share to (account id or email)
             </label>
-            <input
-              id="share-recipient"
-              type="text"
-              value={recipientAccountId}
-              onChange={(e) => {
-                setRecipientAccountId(e.target.value);
-                if (state.kind === "ready" || state.kind === "error") {
-                  setState({ kind: "idle" });
-                }
-              }}
-              placeholder="0x… recipient account id"
-              spellCheck={false}
-              autoCapitalize="none"
-              className="w-full rounded-md border border-border bg-surface px-3 py-2 font-mono text-[12px] text-ink placeholder:text-muted focus:border-ink focus:outline-none focus:ring-1 focus:ring-ink/20"
-            />
+            <div className="flex items-stretch gap-2">
+              <input
+                id="share-recipient"
+                type="text"
+                value={recipient}
+                onChange={(e) => {
+                  setRecipient(e.target.value);
+                  setLookup({ kind: "idle" });
+                  if (state.kind === "ready" || state.kind === "error") {
+                    setState({ kind: "idle" });
+                  }
+                }}
+                placeholder="0x… account id or name@example.com"
+                spellCheck={false}
+                autoCapitalize="none"
+                className="min-w-0 flex-1 rounded-md border border-border bg-surface px-3 py-2 font-mono text-[12px] text-ink placeholder:text-muted focus:border-ink focus:outline-none focus:ring-1 focus:ring-ink/20"
+              />
+              {recipientIsEmail ? (
+                <button
+                  type="button"
+                  onClick={() => void handleCheckEmail()}
+                  disabled={lookup.kind === "checking"}
+                  className="flex flex-shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface px-3 text-xs font-medium text-ink transition-colors hover:bg-canvas focus:outline-none focus:ring-1 focus:ring-ink/20 disabled:opacity-50"
+                  aria-label="Look up the account for this email"
+                >
+                  {lookup.kind === "checking" ? (
+                    <CircleNotch size={13} weight="bold" className="animate-spin" aria-hidden="true" />
+                  ) : (
+                    <MagnifyingGlass size={13} weight="bold" aria-hidden="true" />
+                  )}
+                  Check
+                </button>
+              ) : null}
+            </div>
+
+            {/* Email lookup result */}
+            {recipientIsEmail && lookup.kind === "found" ? (
+              <p className="mt-1.5 text-[11px] text-pastel-greenText">
+                → linked to account{" "}
+                <span className="font-mono text-ink">{shortId(lookup.accountId)}</span>
+              </p>
+            ) : null}
+            {recipientIsEmail && lookup.kind === "notfound" ? (
+              <p className="mt-1.5 text-[11px] text-pastel-redText">
+                No account is linked to this email yet — they must link it under
+                &ldquo;Link email&rdquo; first.
+              </p>
+            ) : null}
+            {recipientIsEmail && lookup.kind === "error" ? (
+              <p className="mt-1.5 text-[11px] text-pastel-redText">{lookup.message}</p>
+            ) : null}
+            {recipientInvalid ? (
+              <p className="mt-1.5 text-[11px] text-pastel-redText">
+                Enter a full account id (0x…) or a valid email.
+              </p>
+            ) : null}
+
             <p className="mt-1 text-[11px] leading-relaxed text-muted">
-              Optional. When set, this share also appears in that account&apos;s
-              &ldquo;Shared with me&rdquo; page after they sign in. The link still
-              works on its own.
+              Optional. When set, the share is <span className="font-medium text-ink">addressed</span>:
+              only that account can open the link (after signing in), and it appears in their
+              &ldquo;Shared with me&rdquo; page. Leave blank for an open link anyone can view.
             </p>
           </div>
 
@@ -287,7 +379,7 @@ export function SharePanel({ sessionIds, repo, onClose }: SharePanelProps) {
               onClick={() => {
                 void handleCreate();
               }}
-              disabled={state.kind === "creating" || count === 0}
+              disabled={state.kind === "creating" || count === 0 || recipientInvalid}
               className="w-full"
             >
               {state.kind === "creating" ? (
@@ -318,10 +410,6 @@ export function SharePanel({ sessionIds, repo, onClose }: SharePanelProps) {
               />
               <div className="text-xs">
                 <p className="font-medium text-pastel-redText">{state.message}</p>
-                <p className="mt-1 leading-relaxed text-pastel-redText">
-                  Server-mediated sharing requires the owner&apos;s on-chain config
-                  (SUI_PRIVATE_KEY + MEMWAL_PACKAGE_ID).
-                </p>
               </div>
             </div>
           )}
@@ -391,9 +479,9 @@ export function SharePanel({ sessionIds, repo, onClose }: SharePanelProps) {
                 <p className="text-[11px] font-medium text-ink">Security note</p>
                 <p className="mt-0.5 text-[11px] leading-relaxed text-muted">
                   The link is an opaque token — the recipient never receives a key. Access is
-                  enforced server-side per this share&apos;s manifest (mode + the selected
-                  sessions), and you can revoke it anytime from Manage shares. On-chain mint and
-                  revoke each cost gas, and an account is limited to roughly 20 delegate keys.
+                  enforced server-side per this share&apos;s manifest, and you can revoke it
+                  anytime from Manage shares (revocation is instant — no gas). When addressed to
+                  an account or email, only that recipient can open it after signing in.
                 </p>
               </div>
             </div>
