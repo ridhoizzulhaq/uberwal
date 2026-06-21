@@ -11,8 +11,10 @@
  *   - revoke stamps `revokedAt` while getByToken still resolves the record,
  *     flagged revoked.
  *
- * Runs in the default `node` environment (no jsdom). `SHARE_DB_PATH` points at
- * an `os.tmpdir()` file and `SESSION_SECRET` is a fixed 64-hex test value; both
+ * The {@link ShareStore} interface is asynchronous (so a Supabase backend can
+ * satisfy it), so every store call is awaited here. With no Supabase env set,
+ * `getShareStore()` returns the SQLite backend, which these tests target via a
+ * tmp-file `SHARE_DB_PATH`. `SESSION_SECRET` is a fixed 64-hex test value; both
  * are set before the store module is used, and the temp files are cleaned up.
  */
 
@@ -38,6 +40,10 @@ const TMP_DB = path.join(
 beforeAll(() => {
   process.env["SHARE_DB_PATH"] = TMP_DB;
   process.env["SESSION_SECRET"] = "b".repeat(64);
+  // Ensure the SQLite backend is selected even if Supabase env leaks in.
+  delete process.env["SUPABASE_URL"];
+  delete process.env["SUPABASE_SERVICE_ROLE_KEY"];
+  delete process.env["SUPABASE_KEY"];
 });
 
 afterAll(() => {
@@ -51,7 +57,7 @@ const KEY_A = "1".repeat(64);
 const KEY_B = "2".repeat(64);
 
 describe("SqliteShareStore", () => {
-  it("round-trips a created share: manifest + decrypted key match", () => {
+  it("round-trips a created share: manifest + decrypted key match", async () => {
     const store = getShareStore();
     const token = newShareToken();
     const manifest: ShareManifest = {
@@ -60,7 +66,7 @@ describe("SqliteShareStore", () => {
       blobIds: ["blob-1", "blob-2"],
     };
 
-    store.create({
+    await store.create({
       token,
       ownerAccountId: "0xowner-a",
       publicKeyHex: "pubkey-a",
@@ -69,7 +75,7 @@ describe("SqliteShareStore", () => {
       label: "uberwal-full-2025-01-01",
     });
 
-    const record = store.getByToken(token);
+    const record = await store.getByToken(token);
     expect(record).not.toBeNull();
     expect(record?.token).toBe(token);
     expect(record?.ownerAccountId).toBe("0xowner-a");
@@ -81,10 +87,10 @@ describe("SqliteShareStore", () => {
     expect(record?.revokedAt).toBeNull();
   });
 
-  it("persists the delegate key as ciphertext, not plaintext", () => {
+  it("persists the delegate key as ciphertext, not plaintext", async () => {
     const store = getShareStore();
     const token = newShareToken();
-    store.create({
+    await store.create({
       token,
       ownerAccountId: "0xowner-a",
       publicKeyHex: "pubkey-enc",
@@ -111,12 +117,12 @@ describe("SqliteShareStore", () => {
     expect(decryptSecret(row.delegate_key_enc)).toBe(KEY_A);
   });
 
-  it("listByOwner returns only that owner's shares, without keys", () => {
+  it("listByOwner returns only that owner's shares, without keys", async () => {
     const store = getShareStore();
     const tokenA = newShareToken();
     const tokenB = newShareToken();
 
-    store.create({
+    await store.create({
       token: tokenA,
       ownerAccountId: "0xowner-list-a",
       publicKeyHex: "pk-a",
@@ -124,7 +130,7 @@ describe("SqliteShareStore", () => {
       manifest: { mode: "summary", namespaces: namespacesForMode("summary") },
       label: "a",
     });
-    store.create({
+    await store.create({
       token: tokenB,
       ownerAccountId: "0xowner-list-b",
       publicKeyHex: "pk-b",
@@ -133,7 +139,7 @@ describe("SqliteShareStore", () => {
       label: "b",
     });
 
-    const summaries = store.listByOwner("0xowner-list-a");
+    const summaries = await store.listByOwner("0xowner-list-a");
     expect(summaries).toHaveLength(1);
     const summary = summaries[0]!;
     expect(summary.token).toBe(tokenA);
@@ -151,10 +157,10 @@ describe("SqliteShareStore", () => {
     expect(summaries.some((s) => s.token === tokenB)).toBe(false);
   });
 
-  it("revoke stamps revokedAt; getByToken still resolves it flagged revoked", () => {
+  it("revoke stamps revokedAt; getByToken still resolves it flagged revoked", async () => {
     const store = getShareStore();
     const token = newShareToken();
-    store.create({
+    await store.create({
       token,
       ownerAccountId: "0xowner-revoke",
       publicKeyHex: "pk-revoke",
@@ -163,22 +169,22 @@ describe("SqliteShareStore", () => {
       label: null,
     });
 
-    expect(store.getByToken(token)?.revokedAt).toBeNull();
+    expect((await store.getByToken(token))?.revokedAt).toBeNull();
 
-    store.revoke(token);
+    await store.revoke(token);
 
-    const record = store.getByToken(token);
+    const record = await store.getByToken(token);
     expect(record).not.toBeNull();
     expect(typeof record?.revokedAt).toBe("number");
     // The key is still decryptable after revoke (revoke is a status flag).
     expect(record?.delegateKey).toBe(KEY_A);
   });
 
-  it("getByToken returns null for an unknown token", () => {
-    expect(getShareStore().getByToken("does-not-exist")).toBeNull();
+  it("getByToken returns null for an unknown token", async () => {
+    expect(await getShareStore().getByToken("does-not-exist")).toBeNull();
   });
 
-  it("round-trips a manifest carrying sessionIds (create → getByToken)", () => {
+  it("round-trips a manifest carrying sessionIds (create → getByToken)", async () => {
     const store = getShareStore();
     const token = newShareToken();
     const manifest: ShareManifest = {
@@ -187,7 +193,7 @@ describe("SqliteShareStore", () => {
       sessionIds: ["sess-a", "sess-b"],
     };
 
-    store.create({
+    await store.create({
       token,
       ownerAccountId: "0xowner-sessions",
       publicKeyHex: "pk-sessions",
@@ -196,12 +202,12 @@ describe("SqliteShareStore", () => {
       label: null,
     });
 
-    const record = store.getByToken(token);
+    const record = await store.getByToken(token);
     expect(record?.manifest.sessionIds).toEqual(["sess-a", "sess-b"]);
     expect(record?.manifest).toEqual(manifest);
   });
 
-  it("parseManifest ignores a non-array sessionIds (omits the field)", () => {
+  it("parseManifest ignores a non-array sessionIds (omits the field)", async () => {
     const store = getShareStore();
     const token = newShareToken();
 
@@ -235,7 +241,7 @@ describe("SqliteShareStore", () => {
       );
     raw.close();
 
-    const record = store.getByToken(token);
+    const record = await store.getByToken(token);
     expect(record).not.toBeNull();
     expect("sessionIds" in (record?.manifest ?? {})).toBe(false);
   });

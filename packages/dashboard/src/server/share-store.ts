@@ -4,11 +4,10 @@ import "server-only";
  * Persistent store for server-mediated shares.
  *
  * Each share couples three things the recipient never sees directly:
- *   1. the minted delegate *private* key (encrypted at rest), used server-side
+ *   1. the owner's delegate *private* key (encrypted at rest), used server-side
  *      to recall on the recipient's behalf;
  *   2. a {@link ShareManifest} describing exactly what is allowed; and
- *   3. status (created / revoked) plus the on-chain `publicKeyHex` revoke
- *      handle.
+ *   3. status (created / revoked) plus the (legacy) `publicKeyHex` handle.
  *
  * A share link carries only the random opaque `token`. The server resolves the
  * token here, decrypts the key in memory for a single request, and enforces the
@@ -16,9 +15,20 @@ import "server-only";
  * extract the key.
  *
  * The store is exposed behind the {@link ShareStore} interface so call sites
- * depend on the contract, not on the engine. The shipped implementation is
- * backed by Node's built-in `node:sqlite` (`DatabaseSync`) — no native module
- * to compile, so it works under any Node version that ships SQLite.
+ * depend on the contract, not the engine. Two backends ship:
+ *
+ *   - **{@link SupabaseShareStore}** (Postgres via `@supabase/supabase-js`) —
+ *     used when `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` are configured.
+ *     This is the production backend: a hosted database persists across
+ *     serverless invocations (e.g. on Vercel, where a local SQLite file would
+ *     not survive between requests).
+ *   - **{@link SqliteShareStore}** (Node's built-in `node:sqlite`) — the
+ *     zero-config fallback for local development and the test suite when no
+ *     Supabase credentials are present.
+ *
+ * The interface is **asynchronous** (every method returns a `Promise`) because
+ * Supabase access is network I/O. The SQLite backend satisfies the same async
+ * contract over synchronous calls.
  */
 
 import { mkdirSync } from "node:fs";
@@ -26,6 +36,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 
 import type { DatabaseSync } from "node:sqlite";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import { decryptSecret, encryptSecret } from "./crypto.js";
 import type { ShareManifest } from "./share-manifest.js";
@@ -54,7 +65,7 @@ export interface ShareRecord {
   token: string;
   /** `0x`-prefixed account object id the share reads from. */
   ownerAccountId: string;
-  /** Delegate public key (hex) — the on-chain revoke handle. */
+  /** Delegate public key (hex) — legacy on-chain revoke handle; `""` for DB-only shares. */
   publicKeyHex: string;
   /** Decrypted delegate private key (hex). Server-only, in-memory only. */
   delegateKey: string;
@@ -100,8 +111,8 @@ export interface NewShareRecord {
 /**
  * Public, key-free view of a share for owner listings.
  *
- * Deliberately omits `ownerAccountId`, `publicKeyHex`, and `delegateKey` so a
- * listing can never leak credentials or the revoke handle to a client surface.
+ * Deliberately omits `publicKeyHex` and `delegateKey` so a listing can never
+ * leak credentials or the revoke handle to a client surface.
  */
 export interface ShareSummary {
   token: string;
@@ -119,34 +130,46 @@ export interface ShareSummary {
   revokedAt: number | null;
 }
 
-/** The storage contract the rest of the app depends on. */
+/**
+ * The storage contract the rest of the app depends on.
+ *
+ * Every method is asynchronous so a network-backed engine (Supabase) and a
+ * synchronous engine (SQLite) can both satisfy it. Read methods degrade
+ * gracefully on infrastructure errors (returning `null` / `[]` after logging
+ * server-side) so a transient outage surfaces as "not found" rather than an
+ * unhandled rejection; write methods throw so their (already try/catch-wrapped)
+ * callers can report the failure.
+ */
 export interface ShareStore {
   /** Persist a new share, encrypting the delegate key at rest. */
-  create(rec: NewShareRecord): void;
+  create(rec: NewShareRecord): Promise<void>;
   /**
    * Resolve a token to its full record (with the DECRYPTED key) or `null` when
    * the token is unknown or the stored key cannot be decrypted.
    */
-  getByToken(token: string): ShareRecord | null;
+  getByToken(token: string): Promise<ShareRecord | null>;
   /** List an owner's shares as key-free summaries, newest first. */
-  listByOwner(ownerAccountId: string): ShareSummary[];
+  listByOwner(ownerAccountId: string): Promise<ShareSummary[]>;
   /** List shares ADDRESSED to a recipient account, newest first (their inbox). */
-  listForRecipient(recipientAccountId: string): ShareSummary[];
+  listForRecipient(recipientAccountId: string): Promise<ShareSummary[]>;
   /** Mark a share revoked (idempotent; no-op for unknown tokens). */
-  revoke(token: string): void;
+  revoke(token: string): Promise<void>;
   /**
    * Link an email to an account id (insert or replace). Self-asserted by the
    * logged-in owner — there is no email verification, so callers must treat the
    * mapping as a convenience directory, not proof of email ownership.
    */
-  setEmailMapping(email: string, accountId: string): void;
+  setEmailMapping(email: string, accountId: string): Promise<void>;
   /** Resolve an email to its account id, or `null` if unmapped. */
-  getAccountByEmail(email: string): string | null;
+  getAccountByEmail(email: string): Promise<string | null>;
   /** Reverse lookup: the most recent email mapped to an account id, or `null`. */
-  getEmailByAccount(accountId: string): string | null;
+  getEmailByAccount(accountId: string): Promise<string | null>;
 }
 
-/** Shape of a `shares` table row as returned by better-sqlite3. */
+/**
+ * Shape of a `shares` table row. Both backends use these snake_case column
+ * names, so the row-mapping helpers below are shared.
+ */
 interface ShareRow {
   token: string;
   owner_account_id: string;
@@ -156,8 +179,65 @@ interface ShareRow {
   label: string | null;
   shared_by: string | null;
   recipient_account_id: string | null;
-  created_at: number;
-  revoked_at: number | null;
+  created_at: number | string;
+  revoked_at: number | string | null;
+}
+
+/** Coerce a possibly-stringified epoch (Postgres bigint via PostgREST) to a number. */
+function toEpoch(value: number | string): number {
+  return typeof value === "number" ? value : Number(value);
+}
+
+/**
+ * Map a raw row to a fully-resolved {@link ShareRecord}, DECRYPTING the key.
+ *
+ * Returns `null` when the key cannot be decrypted (tampered row, wrong/rotated
+ * `SESSION_SECRET`) or the manifest is corrupt, so an unusable row degrades to
+ * "not found" rather than handing back a record without a live key.
+ */
+function rowToRecord(row: ShareRow): ShareRecord | null {
+  const delegateKey = decryptSecret(row.delegate_key_enc);
+  if (delegateKey === null) return null;
+  const manifest = parseManifest(row.manifest_json);
+  if (manifest === null) return null;
+  return {
+    token: row.token,
+    ownerAccountId: row.owner_account_id,
+    publicKeyHex: row.public_key_hex,
+    delegateKey,
+    manifest,
+    label: row.label,
+    sharedBy: row.shared_by ?? null,
+    recipientAccountId: row.recipient_account_id ?? null,
+    createdAt: toEpoch(row.created_at),
+    revokedAt: row.revoked_at === null ? null : toEpoch(row.revoked_at),
+  };
+}
+
+/** Map a raw row to a key-free {@link ShareSummary}, dropping a corrupt manifest. */
+function rowToSummary(row: ShareRow): ShareSummary | null {
+  const manifest = parseManifest(row.manifest_json);
+  if (manifest === null) return null;
+  return {
+    token: row.token,
+    ownerAccountId: row.owner_account_id,
+    manifest,
+    label: row.label,
+    sharedBy: row.shared_by ?? null,
+    recipientAccountId: row.recipient_account_id ?? null,
+    createdAt: toEpoch(row.created_at),
+    revokedAt: row.revoked_at === null ? null : toEpoch(row.revoked_at),
+  };
+}
+
+/** Map many rows to summaries, dropping any with a corrupt manifest. */
+function rowsToSummaries(rows: ShareRow[]): ShareSummary[] {
+  const summaries: ShareSummary[] = [];
+  for (const row of rows) {
+    const summary = rowToSummary(row);
+    if (summary !== null) summaries.push(summary);
+  }
+  return summaries;
 }
 
 /**
@@ -176,6 +256,143 @@ function resolveDbPath(): string {
       : path.resolve(process.cwd(), ".data", "shares.db");
   mkdirSync(path.dirname(target), { recursive: true });
   return target;
+}
+
+/**
+ * Concrete `@supabase/supabase-js`-backed implementation of {@link ShareStore}.
+ *
+ * Uses the **service role** key (server-only) so the dashboard's own app-layer
+ * checks (manifest enforcement, recipient gating in `shared-access.ts`) are the
+ * authority — not Postgres RLS. The key must never reach the browser; this
+ * module is `server-only`.
+ */
+class SupabaseShareStore implements ShareStore {
+  private readonly db: SupabaseClient;
+
+  constructor(url: string, key: string) {
+    this.db = createClient(url, key, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+  }
+
+  async create(rec: NewShareRecord): Promise<void> {
+    const { error } = await this.db.from("shares").insert({
+      token: rec.token,
+      owner_account_id: rec.ownerAccountId,
+      public_key_hex: rec.publicKeyHex,
+      delegate_key_enc: encryptSecret(rec.delegateKey),
+      manifest_json: JSON.stringify(rec.manifest),
+      label: rec.label,
+      shared_by: rec.sharedBy ?? null,
+      recipient_account_id: rec.recipientAccountId ?? null,
+      created_at: rec.createdAt ?? Date.now(),
+      revoked_at: null,
+    });
+    if (error !== null) {
+      throw new Error(`Failed to store share: ${error.message}`);
+    }
+  }
+
+  async getByToken(token: string): Promise<ShareRecord | null> {
+    try {
+      const { data, error } = await this.db
+        .from("shares")
+        .select("*")
+        .eq("token", token)
+        .maybeSingle();
+      if (error !== null) throw new Error(error.message);
+      if (data === null) return null;
+      return rowToRecord(data as ShareRow);
+    } catch (err) {
+      console.error("[share-store] Supabase getByToken failed:", err);
+      return null;
+    }
+  }
+
+  async listByOwner(ownerAccountId: string): Promise<ShareSummary[]> {
+    try {
+      const { data, error } = await this.db
+        .from("shares")
+        .select("*")
+        .eq("owner_account_id", ownerAccountId)
+        .order("created_at", { ascending: false });
+      if (error !== null) throw new Error(error.message);
+      return rowsToSummaries((data ?? []) as ShareRow[]);
+    } catch (err) {
+      console.error("[share-store] Supabase listByOwner failed:", err);
+      return [];
+    }
+  }
+
+  async listForRecipient(recipientAccountId: string): Promise<ShareSummary[]> {
+    try {
+      const { data, error } = await this.db
+        .from("shares")
+        .select("*")
+        .eq("recipient_account_id", recipientAccountId)
+        .order("created_at", { ascending: false });
+      if (error !== null) throw new Error(error.message);
+      return rowsToSummaries((data ?? []) as ShareRow[]);
+    } catch (err) {
+      console.error("[share-store] Supabase listForRecipient failed:", err);
+      return [];
+    }
+  }
+
+  async revoke(token: string): Promise<void> {
+    const { error } = await this.db
+      .from("shares")
+      .update({ revoked_at: Date.now() })
+      .eq("token", token)
+      .is("revoked_at", null);
+    if (error !== null) {
+      throw new Error(`Failed to revoke share: ${error.message}`);
+    }
+  }
+
+  async setEmailMapping(email: string, accountId: string): Promise<void> {
+    const { error } = await this.db
+      .from("account_directory")
+      .upsert(
+        { email, account_id: accountId, created_at: Date.now() },
+        { onConflict: "email" },
+      );
+    if (error !== null) {
+      throw new Error(`Failed to save email mapping: ${error.message}`);
+    }
+  }
+
+  async getAccountByEmail(email: string): Promise<string | null> {
+    try {
+      const { data, error } = await this.db
+        .from("account_directory")
+        .select("account_id")
+        .eq("email", email)
+        .maybeSingle();
+      if (error !== null) throw new Error(error.message);
+      return (data as { account_id: string } | null)?.account_id ?? null;
+    } catch (err) {
+      console.error("[share-store] Supabase getAccountByEmail failed:", err);
+      return null;
+    }
+  }
+
+  async getEmailByAccount(accountId: string): Promise<string | null> {
+    try {
+      const { data, error } = await this.db
+        .from("account_directory")
+        .select("email")
+        .eq("account_id", accountId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error !== null) throw new Error(error.message);
+      return (data as { email: string } | null)?.email ?? null;
+    } catch (err) {
+      console.error("[share-store] Supabase getEmailByAccount failed:", err);
+      return null;
+    }
+  }
 }
 
 /** Concrete `node:sqlite`-backed implementation of {@link ShareStore}. */
@@ -232,7 +449,7 @@ class SqliteShareStore implements ShareStore {
     );
   }
 
-  create(rec: NewShareRecord): void {
+  async create(rec: NewShareRecord): Promise<void> {
     const createdAt = rec.createdAt ?? Date.now();
     const delegateKeyEnc = encryptSecret(rec.delegateKey);
     const manifestJson = JSON.stringify(rec.manifest);
@@ -257,80 +474,39 @@ class SqliteShareStore implements ShareStore {
       );
   }
 
-  getByToken(token: string): ShareRecord | null {
+  async getByToken(token: string): Promise<ShareRecord | null> {
     const row = this.db
       .prepare(`SELECT * FROM shares WHERE token = ?`)
       .get(token) as unknown as ShareRow | undefined;
     if (row === undefined) return null;
-
-    // Decrypt the delegate key in memory only. A decryption failure (tampered
-    // row, wrong/rotated SESSION_SECRET) makes the share unusable, so we report
-    // it as "not found" rather than handing back a record without a live key.
-    const delegateKey = decryptSecret(row.delegate_key_enc);
-    if (delegateKey === null) return null;
-
-    const manifest = parseManifest(row.manifest_json);
-    if (manifest === null) return null;
-
-    return {
-      token: row.token,
-      ownerAccountId: row.owner_account_id,
-      publicKeyHex: row.public_key_hex,
-      delegateKey,
-      manifest,
-      label: row.label,
-      sharedBy: row.shared_by ?? null,
-      recipientAccountId: row.recipient_account_id ?? null,
-      createdAt: row.created_at,
-      revokedAt: row.revoked_at,
-    };
+    return rowToRecord(row);
   }
 
-  listByOwner(ownerAccountId: string): ShareSummary[] {
+  async listByOwner(ownerAccountId: string): Promise<ShareSummary[]> {
     const rows = this.db
       .prepare(
         `SELECT * FROM shares WHERE owner_account_id = ? ORDER BY created_at DESC`,
       )
       .all(ownerAccountId) as unknown as ShareRow[];
-    return this.rowsToSummaries(rows);
+    return rowsToSummaries(rows);
   }
 
-  listForRecipient(recipientAccountId: string): ShareSummary[] {
+  async listForRecipient(recipientAccountId: string): Promise<ShareSummary[]> {
     const rows = this.db
       .prepare(
         `SELECT * FROM shares WHERE recipient_account_id = ? ORDER BY created_at DESC`,
       )
       .all(recipientAccountId) as unknown as ShareRow[];
-    return this.rowsToSummaries(rows);
+    return rowsToSummaries(rows);
   }
 
-  /** Map raw rows to key-free summaries, dropping any with a corrupt manifest. */
-  private rowsToSummaries(rows: ShareRow[]): ShareSummary[] {
-    const summaries: ShareSummary[] = [];
-    for (const row of rows) {
-      const manifest = parseManifest(row.manifest_json);
-      if (manifest === null) continue;
-      summaries.push({
-        token: row.token,
-        ownerAccountId: row.owner_account_id,
-        manifest,
-        label: row.label,
-        sharedBy: row.shared_by ?? null,
-        recipientAccountId: row.recipient_account_id ?? null,
-        createdAt: row.created_at,
-        revokedAt: row.revoked_at,
-      });
-    }
-    return summaries;
-  }
-
-  revoke(token: string): void {
+  async revoke(token: string): Promise<void> {
     this.db
       .prepare(`UPDATE shares SET revoked_at = ? WHERE token = ? AND revoked_at IS NULL`)
       .run(Date.now(), token);
   }
 
-  setEmailMapping(email: string, accountId: string): void {
+  async setEmailMapping(email: string, accountId: string): Promise<void> {
     this.db
       .prepare(
         `INSERT INTO account_directory (email, account_id, created_at)
@@ -341,14 +517,14 @@ class SqliteShareStore implements ShareStore {
       .run(email, accountId, Date.now());
   }
 
-  getAccountByEmail(email: string): string | null {
+  async getAccountByEmail(email: string): Promise<string | null> {
     const row = this.db
       .prepare(`SELECT account_id FROM account_directory WHERE email = ?`)
       .get(email) as unknown as { account_id: string } | undefined;
     return row?.account_id ?? null;
   }
 
-  getEmailByAccount(accountId: string): string | null {
+  async getEmailByAccount(accountId: string): Promise<string | null> {
     const row = this.db
       .prepare(
         `SELECT email FROM account_directory WHERE account_id = ? ORDER BY created_at DESC LIMIT 1`,
@@ -398,22 +574,45 @@ function parseManifest(json: string): ShareManifest | null {
   return manifest;
 }
 
-/** Lazily-initialized singleton, rebuilt if `SHARE_DB_PATH` changes (tests). */
-let singleton: { dbPath: string; store: ShareStore } | null = null;
+/** Lazily-initialized singleton, rebuilt when the active backend changes (tests). */
+let singleton: { kind: string; store: ShareStore } | null = null;
 
 /**
  * Return the process-wide {@link ShareStore} singleton.
  *
- * The connection is opened on first use. If `SHARE_DB_PATH` changes between
- * calls (as in tests that point at a fresh tmp file), a new store is created
- * for the new path so tests stay isolated.
+ * Backend selection (read fresh each call so tests and deploys can switch):
+ *   - **Supabase** when both `SUPABASE_URL` and a key
+ *     (`SUPABASE_SERVICE_ROLE_KEY`, or `SUPABASE_KEY`) are set. This is the
+ *     production path — a hosted DB that survives serverless invocations.
+ *   - **SQLite** otherwise — the zero-config local/dev/test fallback. If
+ *     `SHARE_DB_PATH` changes between calls (as in tests pointing at a fresh
+ *     tmp file), a new store is created for the new path so tests stay isolated.
  */
 export function getShareStore(): ShareStore {
+  const supabaseUrl = process.env["SUPABASE_URL"];
+  const supabaseKey =
+    process.env["SUPABASE_SERVICE_ROLE_KEY"] ?? process.env["SUPABASE_KEY"];
+  if (
+    typeof supabaseUrl === "string" &&
+    supabaseUrl.length > 0 &&
+    typeof supabaseKey === "string" &&
+    supabaseKey.length > 0
+  ) {
+    const kind = `supabase:${supabaseUrl}`;
+    if (singleton !== null && singleton.kind === kind) {
+      return singleton.store;
+    }
+    const store = new SupabaseShareStore(supabaseUrl, supabaseKey);
+    singleton = { kind, store };
+    return store;
+  }
+
   const dbPath = resolveDbPath();
-  if (singleton !== null && singleton.dbPath === dbPath) {
+  const kind = `sqlite:${dbPath}`;
+  if (singleton !== null && singleton.kind === kind) {
     return singleton.store;
   }
   const store = new SqliteShareStore(dbPath);
-  singleton = { dbPath, store };
+  singleton = { kind, store };
   return store;
 }

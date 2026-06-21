@@ -170,10 +170,10 @@ facts that live in the share record, not in Walrus.
 ### Sharing (server-mediated, DB-only — Option B)
 
 A share link is an **opaque token** (`/v/<token>`), never a key. Creating a
-share stores the owner's logged-in delegate key **encrypted at rest** in a local
-SQLite store (`node:sqlite`) alongside a **manifest** of what's allowed. There is
-**no on-chain mint, no gas, no owner wallet key**. When a recipient opens a
-token, the server resolves it, decrypts the key for a single request, enforces
+share stores the owner's logged-in delegate key **encrypted at rest** (AES-256-GCM)
+in the share store — **Supabase (Postgres)** when configured, otherwise a local
+**SQLite** file — alongside a **manifest** of what's allowed. There is **no
+on-chain mint, no gas, no owner wallet key**. When a recipient opens a token, the server resolves it, decrypts the key for a single request, enforces
 the manifest, and returns only allowed content — the key never reaches the
 browser. Revocation is instant and DB-only.
 
@@ -265,20 +265,63 @@ RELAYER_URL=https://relayer-staging.memory.walrus.xyz
 OPENAI_API_KEY=…            # falls back to AWS_BEARER_TOKEN_BEDROCK
 OPENAI_BASE_URL=…           # optional, OpenAI-compatible gateway
 OPENAI_MODEL=openai.gpt-oss-120b
-# SHARE_DB_PATH=.data/shares.db   # optional; default location of the share store
+# --- Share store backend ---
+# Set these two to use Supabase (Postgres). Required for any serverless deploy
+# (e.g. Vercel), where the local SQLite file does NOT persist between requests.
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=…service role key (server-only secret)…
+# If the two above are unset, the dashboard falls back to local SQLite:
+# SHARE_DB_PATH=.data/shares.db   # optional; default location of the SQLite store
 ```
 
 | Variable | Required | Purpose |
 |---|:---:|---|
-| `SESSION_SECRET` | ✓ | Key for the AES-256-GCM session cookie (64-char hex, or a passphrase derived via scrypt). |
+| `SESSION_SECRET` | ✓ | Key for the AES-256-GCM session cookie + at-rest share encryption (64-char hex, or a passphrase derived via scrypt). |
 | `RELAYER_URL` | ✓ | Base URL of the MemWal relayer (must match the network your account/keys belong to). |
 | `OPENAI_API_KEY` | ✓ | API key for the assistant. Falls back to `AWS_BEARER_TOKEN_BEDROCK`. |
 | `OPENAI_BASE_URL` | — | Override the API base URL. |
 | `OPENAI_MODEL` | — | Model id (default `openai.gpt-oss-120b`). |
-| `SHARE_DB_PATH` | — | Path to the SQLite share store (default `.data/shares.db`). |
+| `SUPABASE_URL` | — * | Supabase project URL. Set with the key below to use the Postgres backend. |
+| `SUPABASE_SERVICE_ROLE_KEY` | — * | Supabase **service role** key (server-only). `SUPABASE_KEY` is also accepted. |
+| `SHARE_DB_PATH` | — | SQLite path used only when Supabase is not configured (default `.data/shares.db`). |
+
+> *`SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` are required **together** to
+> select the Supabase backend; with neither set the dashboard uses SQLite.
 
 > Sharing is **DB-only** — no `SUI_PRIVATE_KEY` / `MEMWAL_PACKAGE_ID` / gas
-> required. The owner's logged-in delegate key is reused (encrypted at rest).
+> required. The owner's logged-in delegate key is reused and stored **encrypted
+> at rest** (AES-256-GCM via `SESSION_SECRET`), in Supabase or SQLite.
+
+#### Supabase schema
+
+Run this once in the Supabase SQL editor to create the two tables the share
+store uses (timestamps are epoch-ms `bigint`). The service role key bypasses
+RLS, and all access is enforced in app code (manifest + recipient gating), so
+no RLS policies are required for the server-mediated flow:
+
+```sql
+create table if not exists shares (
+  token                text primary key,
+  owner_account_id     text not null,
+  public_key_hex       text not null,
+  delegate_key_enc     text not null,   -- AES-256-GCM ciphertext, never plaintext
+  manifest_json        text not null,
+  label                text,
+  shared_by            text,
+  recipient_account_id text,
+  created_at           bigint not null,
+  revoked_at           bigint
+);
+create index if not exists shares_owner_idx     on shares (owner_account_id);
+create index if not exists shares_recipient_idx on shares (recipient_account_id);
+
+create table if not exists account_directory (
+  email      text primary key,
+  account_id text not null,
+  created_at bigint not null
+);
+create index if not exists account_directory_account_idx on account_directory (account_id);
+```
 
 Run the dashboard:
 ```bash
@@ -330,5 +373,5 @@ uberwal/
 │       ├── src/app/             #   workspace, /s/[sessionId], /shared (inbox), /v/[token] (recipient)
 │       │   └── actions/         #   auth, recall, reader, share, shared-access, directory
 │       ├── src/components/      #   ReaderChat, AssistantDrawer, CompareDrawer, SharePanel, ProjectSummary, …
-│       └── src/server/          #   session (encrypted cookie), memwal-factory, reader-agent, share-store (SQLite), share-manifest, manifest-scope
+│       └── src/server/          #   session (encrypted cookie), memwal-factory, reader-agent, share-store (Supabase/SQLite), share-manifest, manifest-scope
 ```

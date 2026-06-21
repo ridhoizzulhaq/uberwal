@@ -116,7 +116,7 @@ export async function createShare(input: {
     }
     recipientAccountId = rawAccount;
   } else if (rawEmail.length > 0) {
-    const resolved = getShareStore().getAccountByEmail(rawEmail);
+    const resolved = await getShareStore().getAccountByEmail(rawEmail);
     if (resolved === null) {
       return {
         ok: false,
@@ -154,13 +154,13 @@ export async function createShare(input: {
     // email), NOT typed by the user. When no email is linked we fall back to
     // the FULL account id (never abbreviated) so the recipient always sees who
     // shared it.
-    const ownerEmail = getShareStore().getEmailByAccount(session.accountId);
+    const ownerEmail = await getShareStore().getEmailByAccount(session.accountId);
     const sharedBy = ownerEmail ?? session.accountId;
 
     // Option B (DB-only): reuse the owner's logged-in delegate key rather than
     // minting a dedicated on-chain key. `publicKeyHex` is empty because there
     // is no on-chain revoke handle — revocation is server-side via `revoke`.
-    getShareStore().create({
+    await getShareStore().create({
       token,
       ownerAccountId: session.accountId,
       publicKeyHex: "",
@@ -196,7 +196,7 @@ export async function revokeShare(input: {
   }
 
   const store = getShareStore();
-  const record = store.getByToken(input.token);
+  const record = await store.getByToken(input.token);
   if (record === null) {
     return { ok: false, message: "Share not found." };
   }
@@ -205,7 +205,7 @@ export async function revokeShare(input: {
   }
 
   try {
-    store.revoke(input.token);
+    await store.revoke(input.token);
     return { ok: true };
   } catch (error) {
     return { ok: false, message: toErrorMessage(error) };
@@ -267,8 +267,8 @@ export async function listSharesForMe(): Promise<SharedWithMeResult> {
   if (session === null) {
     return { ok: false, message: "Not authenticated" };
   }
-  const items = getShareStore()
-    .listForRecipient(session.accountId)
+  const rows = await getShareStore().listForRecipient(session.accountId);
+  const items = rows
     .filter((s) => s.revokedAt === null)
     .map((s) => ({
       token: s.token,

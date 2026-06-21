@@ -166,7 +166,7 @@ async function recipientGate(
 export async function getShareMeta(input: {
   token: string;
 }): Promise<ShareMetaResult> {
-  const record = getShareStore().getByToken(input.token);
+  const record = await getShareStore().getByToken(input.token);
   if (record === null) {
     return { ok: false, message: "This share link is not valid or has expired." };
   }
@@ -203,7 +203,7 @@ export async function recallByToken(input: {
   limit?: number;
 }): Promise<RecallNamespaceResult> {
   try {
-    const record = getShareStore().getByToken(input.token);
+    const record = await getShareStore().getByToken(input.token);
     if (record === null) {
       return { ok: false, message: "This share link is not valid or has expired." };
     }
@@ -270,7 +270,7 @@ export async function listSessionsByToken(input: {
   token: string;
 }): Promise<ListSessionsByTokenResult> {
   try {
-    const record = getShareStore().getByToken(input.token);
+    const record = await getShareStore().getByToken(input.token);
     if (record === null) {
       return { ok: false, message: "This share link is not valid or has expired." };
     }
@@ -352,7 +352,7 @@ export async function getSessionDetailByToken(input: {
   sessionId: string;
 }): Promise<GetSessionDetailByTokenResult> {
   try {
-    const record = getShareStore().getByToken(input.token);
+    const record = await getShareStore().getByToken(input.token);
     if (record === null) {
       return { ok: false, message: "This share link is not valid or has expired." };
     }
@@ -452,7 +452,7 @@ export async function askReaderByToken(input: {
    */
   sessionIds?: string[];
 }): Promise<RunReaderResult> {
-  const record = getShareStore().getByToken(input.token);
+  const record = await getShareStore().getByToken(input.token);
   if (record === null) {
     return { ok: false, message: "This share link is not valid or has expired." };
   }
@@ -484,31 +484,34 @@ export async function askReaderByToken(input: {
 
   // Trusted, non-memory provenance the recipient assistant should know. These
   // facts come from the share record, NOT from Walrus, so without this the
-  // assistant cannot answer "whose work is this" / "what is this about".
+  // assistant cannot answer "whose work is this" / "what is this share" / "what
+  // is its title".
   //
-  // The wording deliberately disambiguates two things the model otherwise
-  // conflates:
-  //   - the PERSON whose work this is = the developer/owner who shared it
-  //     (identified by `sender`: their linked email, else their account id);
-  //   - the share TITLE (`subject`/label) = a topic label the owner typed, NOT
-  //     a person.
+  // Present them as plainly-LABELED facts rather than redefining the word
+  // "subject": the model then answers correctly for any phrasing —
+  //   - "share title" / "subject title" -> the label,
+  //   - "who is the subject" / "whose work is this" -> the developer (sender),
+  // without conflating the two (the earlier bug) or collapsing them (the
+  // over-correction where "subject title" was read as the person's job title).
   const subject =
     record.label !== null && record.label.trim().length > 0
       ? record.label.trim()
       : null;
   const sender = senderDisplay(record);
-  const noteParts: string[] = [
-    `These memories are the captured work of ONE developer — the owner who shared this view, identified as "${sender}". When asked who this is about, whose work this is, or "who is the subject", answer with this developer (${sender}); never answer with the share title.`,
+  const facts: string[] = [
+    `- Shared by / author: ${sender} — the single developer whose captured work the memories below are (their linked email if available, otherwise their account id). The memories are this one developer's work; there is no separate person.`,
+    subject !== null
+      ? `- Share title: "${subject}" — the label the owner gave this shared view. It is a topic label, not a person and not a job title.`
+      : `- Share title: (the owner did not set a title for this share).`,
   ];
-  if (subject !== null) {
-    noteParts.push(
-      `The owner titled this share "${subject}" — that is a topic label for the share, NOT a person's name.`,
-    );
-  }
   if (manifestRepo !== undefined) {
-    noteParts.push(`The shared work belongs to the project/repository "${manifestRepo}".`);
+    facts.push(`- Project / repository: ${manifestRepo}.`);
   }
-  const contextNote = `Share provenance (from the share record, not from recalled memories): ${noteParts.join(" ")}`;
+  const contextNote =
+    "Share provenance (these facts come from the share record, NOT from the " +
+    "recalled memories below). Use them to answer questions about what this " +
+    "share is, its title, who shared it, or whose work it is:\n" +
+    facts.join("\n");
 
   // For the UNSCOPED path the preset's namespaces must overlap the manifest;
   // the SCOPED path instead reads the manifest namespaces directly (see below),
@@ -700,7 +703,7 @@ export async function askCompare(input: AskCompareInput): Promise<RunReaderResul
       const token = input.tokens[i];
       if (token === undefined || token.length === 0) continue;
 
-      const record = store.getByToken(token);
+      const record = await store.getByToken(token);
       if (record === null || record.revokedAt !== null) continue;
 
       const allowed = new Set<Namespace>(record.manifest.namespaces);

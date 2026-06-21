@@ -50,7 +50,7 @@ export async function registerEmail(input: {
     return { ok: false, message: "Enter a valid email address." };
   }
   try {
-    getShareStore().setEmailMapping(email, session.accountId);
+    await getShareStore().setEmailMapping(email, session.accountId);
     return { ok: true, email, accountId: session.accountId };
   } catch {
     return { ok: false, message: "Could not save the email mapping. Try again." };
@@ -65,7 +65,7 @@ export async function getMyEmail(): Promise<MyEmailResult> {
   if (session === null) {
     return { ok: false, message: "Not authenticated" };
   }
-  const email = getShareStore().getEmailByAccount(session.accountId);
+  const email = await getShareStore().getEmailByAccount(session.accountId);
   return { ok: true, email, accountId: session.accountId };
 }
 
@@ -87,6 +87,6 @@ export async function lookupEmail(input: {
   if (!EMAIL_PATTERN.test(email)) {
     return { ok: false, message: "Enter a valid email address." };
   }
-  const accountId = getShareStore().getAccountByEmail(email);
+  const accountId = await getShareStore().getAccountByEmail(email);
   return { ok: true, email, accountId };
 }

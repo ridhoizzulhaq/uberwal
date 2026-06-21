@@ -1,0 +1,4 @@
+{
+  "framework": "nextjs",
+  "buildCommand": "pnpm --filter @uberwal/shared build && pnpm --filter @uberwal/dashboard build"
+}
