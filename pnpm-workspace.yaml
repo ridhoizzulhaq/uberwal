@@ -1,4 +1,9 @@
 packages:
   - "packages/*"
-allowBuilds:
-  better-sqlite3: set this to true or false
+
+# Dependencies allowed to run install/build scripts. pnpm 11 errors on
+# un-approved build scripts in CI (ERR_PNPM_IGNORED_BUILDS), so these are
+# declared explicitly for a reproducible, non-interactive install.
+onlyBuiltDependencies:
+  - esbuild
+  - sharp
