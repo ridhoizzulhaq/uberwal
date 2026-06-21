@@ -1,4 +1,5 @@
 {
   "framework": "nextjs",
+  "installCommand": "pnpm install --no-frozen-lockfile",
   "buildCommand": "pnpm --filter @uberwal/shared build && pnpm --filter @uberwal/dashboard build"
 }
