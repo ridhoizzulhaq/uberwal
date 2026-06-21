@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.next/
+coverage/
+*.log
+.DS_Store
+.env
+.env.local
+.env.*.local
+
+# Kiro local settings — contains MCP server credentials (DELEGATE_KEY,
+# OPENAI_API_KEY / AWS_BEARER_TOKEN_BEDROCK). Never commit.
+.kiro/settings/
+
+# Local SQLite share store (encrypted at rest, but never committed).
+**/.data/

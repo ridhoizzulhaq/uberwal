@@ -1,0 +1,37 @@
+{
+  "name": "@uberwal/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Uberwal dashboard: a Next.js + Tailwind app for browsing skills, productivity, sessions, and reports stored in Walrus Memory.",
+  "scripts": {
+    "build": "next build",
+    "dev": "next dev",
+    "start": "next start",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mysten-incubation/memwal": "^0.0.7",
+    "@phosphor-icons/react": "^2.1.10",
+    "@uberwal/shared": "workspace:*",
+    "next": "^15.1.0",
+    "openai": "^4.77.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "9.0.1",
+    "remark-gfm": "4.0.0",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.1.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.2",
+    "autoprefixer": "^10.5.0",
+    "fast-check": "^3.23.2",
+    "jsdom": "^25.0.1",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

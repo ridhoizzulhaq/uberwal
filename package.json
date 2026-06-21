@@ -1,0 +1,25 @@
+{
+  "name": "uberwal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Uberwal monorepo: MCP server and dashboard for verified coding-session memories on Walrus Memory.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "pnpm -r --if-present run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "pnpm -r --if-present run typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "fast-check": "^3.23.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.1.1"
+}

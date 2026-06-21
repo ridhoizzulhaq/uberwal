@@ -1,0 +1,32 @@
+{
+  "name": "@uberwal/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Uberwal MCP server for Claude Code: extract/commit/recall/report/share tools backed by Walrus Memory.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "uberwal-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "openai": "^4.77.0",
+    "@uberwal/shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@mysten-incubation/memwal": "^0.0.7",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "fast-check": "^3.23.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
