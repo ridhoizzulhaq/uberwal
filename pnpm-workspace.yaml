@@ -1,9 +1,15 @@
 packages:
   - "packages/*"
 
-# Dependencies allowed to run install/build scripts. pnpm 11 errors on
-# un-approved build scripts in CI (ERR_PNPM_IGNORED_BUILDS), so these are
-# declared explicitly for a reproducible, non-interactive install.
+# Dependencies allowed to run install/build scripts. pnpm 10/11 errors on
+# un-approved build scripts (ERR_PNPM_IGNORED_BUILDS), so these are declared
+# explicitly for a reproducible, non-interactive install. Both keys are listed
+# for cross-version safety: `onlyBuiltDependencies` (pnpm 10 / early 11) and
+# the consolidated `allowBuilds` map (pnpm 11+). Vercel's pnpm honors one of them.
 onlyBuiltDependencies:
   - esbuild
   - sharp
+
+allowBuilds:
+  esbuild: true
+  sharp: true
