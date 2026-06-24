@@ -234,7 +234,7 @@ pnpm exec vitest run       # run the full test suite (unit + property)
       "env": {
         "DELEGATE_KEY": "…64-char hex…",
         "ACCOUNT_ID": "0x…64-char hex…",
-        "RELAYER_URL": "https://relayer-staging.memory.walrus.xyz",
+        "RELAYER_URL": "https://relayer.memory.walrus.xyz",
         "OPENAI_API_KEY": "…",
         "OPENAI_BASE_URL": "https://…(optional, for OpenAI-compatible gateways)…",
         "OPENAI_MODEL": "openai.gpt-oss-120b"
@@ -261,7 +261,7 @@ pnpm exec vitest run       # run the full test suite (unit + property)
 
 ```bash
 SESSION_SECRET=…32-byte hex (openssl rand -hex 32) or a passphrase…
-RELAYER_URL=https://relayer-staging.memory.walrus.xyz
+RELAYER_URL=https://relayer.memory.walrus.xyz
 OPENAI_API_KEY=…            # falls back to AWS_BEARER_TOKEN_BEDROCK
 OPENAI_BASE_URL=…           # optional, OpenAI-compatible gateway
 OPENAI_MODEL=openai.gpt-oss-120b
@@ -328,9 +328,9 @@ Run the dashboard:
 pnpm --filter @uberwal/dashboard dev
 ```
 
-> **Networks.** The examples point at the **staging** relayer
-> (`https://relayer-staging.memory.walrus.xyz`); mainnet is
-> `https://relayer.memory.walrus.xyz`. Accounts/keys and stored memories are
+> **Networks.** The examples point at the **mainnet** relayer
+> (`https://relayer.memory.walrus.xyz`); staging is
+> `https://relayer-staging.memory.walrus.xyz`. Accounts/keys and stored memories are
 > network-specific — switching networks is a clean slate, not a migration.
 
 ---

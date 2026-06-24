@@ -58,7 +58,7 @@ const STUB_ACCOUNT_ID =
   "0x1111111111111111111111111111111111111111111111111111111111111111";
 
 /** Any absolute URL is fine — the handler treats it as opaque. */
-const STUB_RELAYER_URL = "https://relayer-staging.memory.walrus.xyz";
+const STUB_RELAYER_URL = "https://relayer.memory.walrus.xyz";
 
 /** Uberwal dashboard URL the recipient logs into (distinct from MemWal). */
 const STUB_DASHBOARD_URL = "https://devmemory.example/app";

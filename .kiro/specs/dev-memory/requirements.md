@@ -22,7 +22,7 @@ Session capture follows a two-phase capture-with-review workflow. When a session
 - **Dashboard**: The Next.js + Tailwind web application for viewing and searching memories
 - **Distance_Score**: A float value from MemWal's recall indicating semantic similarity; lower values mean higher relevance (< 0.25 = duplicate, 0.25–0.55 = related, 0.55–0.7 = weak, >= 0.7 = unrelated)
 - **Role_Selector**: A UI control that determines which namespaces are visible based on viewer role (developer, team lead, recruiter)
-- **Relayer**: The staging server (https://relayer-staging.memory.walrus.xyz) that handles MemWal API requests
+- **Relayer**: The mainnet server (https://relayer.memory.walrus.xyz) that handles MemWal API requests
 
 ## Requirements
 

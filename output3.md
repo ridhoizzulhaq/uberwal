@@ -194,7 +194,7 @@ at the MemWal dashboard `https://memory.walrus.xyz`).
 
 - Append-only, decentralized; addressed by `accountId` (Sui object id) + Ed25519 `delegateKey`.
 - Reached via a **relayer** (`RELAYER_URL`). Staging: `https://relayer-staging.memory.walrus.xyz`;
-  mainnet: `https://relayer.memory.walrus.xyz`. The current demo runs **staging**.
+  mainnet: `https://relayer.memory.walrus.xyz`. The current demo runs **mainnet**.
 - A `delegateKey` is **not** the Sui account key — it's a scoped key that can read/append to that
   account's memory. Multiple delegate keys can exist for one account (this underpins sharing).
 - Because storage is permanent, the pipeline redacts secrets early and gates commits.
