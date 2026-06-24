@@ -24,6 +24,7 @@ import { MemWalClient } from "@uberwal/shared";
 
 import { getShareStore, type ShareRecord } from "../../server/share-store.js";
 import { getSession } from "../../server/session.js";
+import { normalizeRelayerUrl } from "../../lib/relayer-url.js";
 import type { ShareMode } from "../../server/share-manifest.js";
 import { filterByManifestScope } from "../../server/manifest-scope.js";
 import {
@@ -74,8 +75,8 @@ export type ShareMetaResult =
  * construct the short-lived client and is never logged.
  */
 function clientForRecord(record: ShareRecord): MemWalClient {
-  const serverUrl = process.env["RELAYER_URL"];
-  if (typeof serverUrl !== "string" || serverUrl.length === 0) {
+  const serverUrl = normalizeRelayerUrl(process.env["RELAYER_URL"]);
+  if (serverUrl === null) {
     throw new Error(
       "RELAYER_URL environment variable is required to resolve shared memories.",
     );

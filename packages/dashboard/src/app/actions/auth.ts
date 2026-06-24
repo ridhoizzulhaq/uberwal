@@ -52,6 +52,7 @@ import {
 } from "@uberwal/shared";
 
 import { clearSession, setSession } from "../../server/session.js";
+import { normalizeRelayerUrl } from "../../lib/relayer-url.js";
 
 /** 10-second health-check budget per Requirement 7.1 / 7.5. */
 const HEALTH_TIMEOUT_MS = 10_000;
@@ -168,8 +169,8 @@ export async function login(input: LoginInput): Promise<LoginResult> {
   // the SDK directly (rather than `MemWalClient.isHealthy()`) because the
   // wrapper collapses every failure mode to `false`, and we need the
   // underlying error to distinguish auth failure from connectivity.
-  const serverUrl = process.env["RELAYER_URL"];
-  if (typeof serverUrl !== "string" || serverUrl.length === 0) {
+  const serverUrl = normalizeRelayerUrl(process.env["RELAYER_URL"]);
+  if (serverUrl === null) {
     throw new Error(
       "RELAYER_URL environment variable is required to authenticate.",
     );

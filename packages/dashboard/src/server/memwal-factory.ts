@@ -20,6 +20,7 @@ import "server-only";
 import { MemWalClient } from "@uberwal/shared";
 
 import { getSession } from "./session.js";
+import { normalizeRelayerUrl } from "../lib/relayer-url.js";
 
 /**
  * Build a `MemWalClient` for the current request, or return `null` when
@@ -35,8 +36,8 @@ export async function getMemWalClientFromSession(): Promise<MemWalClient | null>
   const session = await getSession();
   if (session === null) return null;
 
-  const serverUrl = process.env["RELAYER_URL"];
-  if (typeof serverUrl !== "string" || serverUrl.length === 0) {
+  const serverUrl = normalizeRelayerUrl(process.env["RELAYER_URL"]);
+  if (serverUrl === null) {
     throw new Error(
       "RELAYER_URL environment variable is required to construct a MemWal client.",
     );
