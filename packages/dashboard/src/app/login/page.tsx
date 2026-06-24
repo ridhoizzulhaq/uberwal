@@ -38,7 +38,7 @@ export default function LoginPage() {
   const accountIdFormatOk = isValidAccountId(accountId);
 
   const delegateKeyError: string | null = delegateKeyEmpty
-    ? "Delegate key is required."
+    ? "Delegate private key is required."
     : delegateKeyFormatOk
       ? null
       : "Must be 64 hexadecimal characters.";
@@ -162,7 +162,7 @@ export default function LoginPage() {
             {/* Delegate key */}
             <div className="flex flex-col gap-1.5">
               <label htmlFor="delegateKey" className="text-sm font-medium text-ink">
-                Delegate key
+                Delegate private key
               </label>
               <input
                 id="delegateKey"
@@ -174,7 +174,7 @@ export default function LoginPage() {
                 onChange={(e) => setDelegateKey(e.currentTarget.value)}
                 aria-invalid={delegateKeyError !== null}
                 aria-describedby={delegateKeyError !== null ? "delegateKey-error" : undefined}
-                placeholder="64-character hex"
+                placeholder="64-character hex private key"
                 className={[
                   "w-full rounded-md border bg-surface px-3 py-2.5 font-mono text-sm text-ink placeholder:text-muted",
                   "transition-colors duration-150",

@@ -103,7 +103,7 @@ const INVALID_DELEGATE_KEY = "a".repeat(32);
  */
 function fillCredentials(delegateKey: string, accountId: string): void {
   const delegateInput = screen.getByLabelText(
-    /delegate key/i,
+    /delegate private key/i,
   ) as HTMLInputElement;
   const accountInput = screen.getByLabelText(/account id/i) as HTMLInputElement;
   fireEvent.change(delegateInput, { target: { value: delegateKey } });
@@ -140,7 +140,7 @@ describe("<LoginPage />", () => {
 
     // Typing only the delegate key still leaves the account ID empty,
     // so the button must remain disabled (Req 7.3 covers either field).
-    fireEvent.change(screen.getByLabelText(/delegate key/i), {
+    fireEvent.change(screen.getByLabelText(/delegate private key/i), {
       target: { value: VALID_DELEGATE_KEY },
     });
     expect(submit.disabled).toBe(true);
@@ -224,7 +224,7 @@ describe("<LoginPage />", () => {
     // Form fields preserved so the viewer can fix a typo without
     // re-entering both 64-character hex strings (Req 7.2).
     const delegateInput = screen.getByLabelText(
-      /delegate key/i,
+      /delegate private key/i,
     ) as HTMLInputElement;
     const accountInput = screen.getByLabelText(
       /account id/i,
@@ -261,7 +261,7 @@ describe("<LoginPage />", () => {
 
     // Form fields preserved so the viewer can retry without re-typing.
     const delegateInput = screen.getByLabelText(
-      /delegate key/i,
+      /delegate private key/i,
     ) as HTMLInputElement;
     const accountInput = screen.getByLabelText(
       /account id/i,
