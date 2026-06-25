@@ -10,6 +10,8 @@ a dashboard.
 > **▶ [Watch the Demo Video](https://www.youtube.com/watch?v=kZcOjDpTYU8)**
 >
 > **📑 [View the Pitch Deck](https://drive.google.com/file/d/1yaJMThlCvdTyS7VNokk_NhYQdr3OR81r/view?usp=sharing)**
+> 
+> **📑 [View the Dashboard App](https://uberwal-app.vercel.app/)**
 
 ---
 
