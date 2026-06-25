@@ -11,7 +11,9 @@ a dashboard.
 >
 > **📑 [View the Pitch Deck](https://drive.google.com/file/d/1yaJMThlCvdTyS7VNokk_NhYQdr3OR81r/view?usp=sharing)**
 > 
-> **📑 [View the Dashboard App](https://uberwal-app.vercel.app/)**
+> **🌐 [View the Dashboard App](https://uberwal-app.vercel.app/)**
+>
+> **📖 [User Guide Documentation ](https://app.notion.com/p/Uberwal-38af866c75b780e49e72cb1ded785555)**
 
 ---
 
